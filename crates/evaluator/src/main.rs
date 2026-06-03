@@ -37,7 +37,7 @@ async fn main() -> color_eyre::Result<()> {
 
   let wakeup = Arc::new(tokio::sync::Notify::new());
   let listener_handle = circus_common::pg_notify::spawn_listener(
-    db.pool(),
+    &config.database.url,
     &[circus_common::pg_notify::CHANNEL_JOBSETS_CHANGED],
     Arc::clone(&wakeup),
   );
@@ -65,7 +65,10 @@ async fn main() -> color_eyre::Result<()> {
 
 /// Write a service heartbeat on every poll tick so the server's /health
 /// endpoint can report evaluator liveness.
-async fn heartbeat_loop(pool: sqlx::PgPool, poll_interval_seconds: u64) {
+async fn heartbeat_loop(
+  pool: circus_common::PgPool,
+  poll_interval_seconds: u64,
+) {
   let interval = std::time::Duration::from_secs(poll_interval_seconds.max(1));
   let poll_u32 = u32::try_from(poll_interval_seconds.min(u64::from(u32::MAX)))
     .unwrap_or(u32::MAX);

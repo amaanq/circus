@@ -76,11 +76,8 @@ async fn test_worker_pool_drain_stops_dispatch() {
     return;
   };
 
-  let pool = sqlx::postgres::PgPoolOptions::new()
-    .max_connections(1)
-    .connect(&url)
-    .await
-    .expect("failed to connect");
+  let pool =
+    circus_common::db::build_pool(&url, 1).expect("failed to build pool");
 
   let hot_config = std::sync::Arc::new(tokio::sync::RwLock::new(
     circus_common::config::HotConfig {
@@ -201,11 +198,8 @@ async fn test_worker_pool_active_builds_cancel() {
     return;
   };
 
-  let pool = sqlx::postgres::PgPoolOptions::new()
-    .max_connections(1)
-    .connect(&url)
-    .await
-    .expect("failed to connect");
+  let pool =
+    circus_common::db::build_pool(&url, 1).expect("failed to build pool");
 
   let hot_config = std::sync::Arc::new(tokio::sync::RwLock::new(
     circus_common::config::HotConfig {
@@ -267,16 +261,12 @@ async fn test_fair_share_scheduling() {
     return;
   };
 
-  let pool = sqlx::postgres::PgPoolOptions::new()
-    .max_connections(5)
-    .connect(&url)
-    .await
-    .expect("failed to connect");
-
-  sqlx::migrate!("../common/migrations")
-    .run(&pool)
+  circus_migrations::run_migrations(&url)
     .await
     .expect("migration failed");
+
+  let pool =
+    circus_common::db::build_pool(&url, 5).expect("failed to build pool");
 
   // Create two projects with different scheduling shares
   let project_hi = circus_common::repo::projects::create(
@@ -513,16 +503,12 @@ async fn test_atomic_build_claiming() {
     return;
   };
 
-  let pool = sqlx::postgres::PgPoolOptions::new()
-    .max_connections(5)
-    .connect(&url)
-    .await
-    .expect("failed to connect");
-
-  sqlx::migrate!("../common/migrations")
-    .run(&pool)
+  circus_migrations::run_migrations(&url)
     .await
     .expect("migration failed");
+
+  let pool =
+    circus_common::db::build_pool(&url, 5).expect("failed to build pool");
 
   // Create a project -> jobset -> evaluation -> build chain
   let project = circus_common::repo::projects::create(
@@ -612,16 +598,12 @@ async fn test_orphan_build_reset() {
     return;
   };
 
-  let pool = sqlx::postgres::PgPoolOptions::new()
-    .max_connections(5)
-    .connect(&url)
-    .await
-    .expect("failed to connect");
-
-  sqlx::migrate!("../common/migrations")
-    .run(&pool)
+  circus_migrations::run_migrations(&url)
     .await
     .expect("migration failed");
+
+  let pool =
+    circus_common::db::build_pool(&url, 5).expect("failed to build pool");
 
   let project = circus_common::repo::projects::create(
     &pool,
@@ -691,14 +673,15 @@ async fn test_orphan_build_reset() {
   // Simulate the build being stuck for a while by manually backdating
   // started_at
   // Truly a genius way to test.
-  sqlx::query(
-    "UPDATE builds SET started_at = NOW() - INTERVAL '10 minutes' WHERE id = \
-     $1",
-  )
-  .bind(build.id)
-  .execute(&pool)
-  .await
-  .expect("backdate build");
+  let client = pool.get().await.expect("get client");
+  client
+    .execute(
+      "UPDATE builds SET started_at = NOW() - INTERVAL '10 minutes' WHERE id \
+       = $1",
+      &[&build.id],
+    )
+    .await
+    .expect("backdate build");
 
   // Reset orphaned builds (older than 5 minutes)
   let count = circus_common::repo::builds::reset_orphaned(&pool, 300)
@@ -726,16 +709,12 @@ async fn test_get_cancelled_among() {
     return;
   };
 
-  let pool = sqlx::postgres::PgPoolOptions::new()
-    .max_connections(5)
-    .connect(&url)
-    .await
-    .expect("failed to connect");
-
-  sqlx::migrate!("../common/migrations")
-    .run(&pool)
+  circus_migrations::run_migrations(&url)
     .await
     .expect("migration failed");
+
+  let pool =
+    circus_common::db::build_pool(&url, 5).expect("failed to build pool");
 
   let project = circus_common::repo::projects::create(
     &pool,

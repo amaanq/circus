@@ -17,22 +17,17 @@ use axum::{
 use circus_common::models::*;
 use tower::ServiceExt;
 
-async fn get_pool() -> Option<sqlx::PgPool> {
+async fn get_pool() -> Option<circus_common::PgPool> {
   let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
     println!("Skipping E2E test: TEST_DATABASE_URL not set");
     return None;
   };
 
-  let pool = sqlx::postgres::PgPoolOptions::new()
-    .max_connections(5)
-    .connect(&url)
+  circus_common::run_migrations(&url)
     .await
-    .ok()?;
+    .expect("run migrations");
 
-  sqlx::migrate!("../common/migrations")
-    .run(&pool)
-    .await
-    .ok()?;
+  let pool = circus_common::db::build_pool(&url, 5).expect("build pool");
 
   Some(pool)
 }

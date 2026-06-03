@@ -7,12 +7,15 @@
 //! any agent in the cluster is immediately visible to substituters.
 
 use chrono::{DateTime, Utc};
+use circus_codegen::queries::narinfo_cache as q;
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, PgPool};
 
-use crate::error::{CiError, Result};
+use crate::{
+  db::PgPool,
+  error::{CiError, Result},
+};
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NarInfo {
   pub store_path:  String,
   pub nar_hash:    String,
@@ -27,6 +30,26 @@ pub struct NarInfo {
   pub ca:          Option<String>,
   pub created_at:  DateTime<Utc>,
   pub updated_at:  DateTime<Utc>,
+}
+
+impl From<q::NarinfoCacheRow> for NarInfo {
+  fn from(r: q::NarinfoCacheRow) -> Self {
+    Self {
+      store_path:  r.store_path,
+      nar_hash:    r.nar_hash,
+      nar_size:    r.nar_size,
+      file_hash:   r.file_hash,
+      file_size:   r.file_size,
+      compression: r.compression,
+      url:         r.url,
+      deriver:     r.deriver,
+      references:  r.references,
+      sig:         r.sig,
+      ca:          r.ca,
+      created_at:  r.created_at,
+      updated_at:  r.updated_at,
+    }
+  }
 }
 
 pub struct UpsertNarInfo<'a> {
@@ -46,33 +69,25 @@ pub struct UpsertNarInfo<'a> {
 /// Insert or replace the narinfo for one store path.
 ///
 /// # Errors
-/// Returns the underlying sqlx error.
+/// Returns the underlying database error.
 pub async fn upsert(pool: &PgPool, info: UpsertNarInfo<'_>) -> Result<()> {
-  sqlx::query(
-    "INSERT INTO narinfo_cache (store_path, nar_hash, nar_size, file_hash, \
-     file_size, compression, url, deriver, \"references\", sig, ca, \
-     updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW()) \
-     ON CONFLICT (store_path) DO UPDATE SET nar_hash = EXCLUDED.nar_hash, \
-     nar_size = EXCLUDED.nar_size, file_hash = EXCLUDED.file_hash, file_size \
-     = EXCLUDED.file_size, compression = EXCLUDED.compression, url = \
-     EXCLUDED.url, deriver = EXCLUDED.deriver, \"references\" = \
-     EXCLUDED.\"references\", sig = EXCLUDED.sig, ca = EXCLUDED.ca, \
-     updated_at = NOW()",
-  )
-  .bind(info.store_path)
-  .bind(info.nar_hash)
-  .bind(info.nar_size)
-  .bind(info.file_hash)
-  .bind(info.file_size)
-  .bind(info.compression)
-  .bind(info.url)
-  .bind(info.deriver)
-  .bind(info.references)
-  .bind(info.sig)
-  .bind(info.ca)
-  .execute(pool)
-  .await
-  .map_err(CiError::Database)?;
+  let client = pool.get().await?;
+  q::upsert()
+    .bind(
+      &client,
+      &info.store_path,
+      &info.nar_hash,
+      &info.nar_size,
+      &info.file_hash,
+      &info.file_size,
+      &info.compression,
+      &info.url,
+      &info.deriver,
+      &info.references,
+      &info.sig,
+      &info.ca,
+    )
+    .await?;
   Ok(())
 }
 
@@ -80,16 +95,15 @@ pub async fn upsert(pool: &PgPool, info: UpsertNarInfo<'_>) -> Result<()> {
 ///
 /// # Errors
 /// `CiError::NotFound` when no row matches, `CiError::Database` for
-/// underlying sqlx errors.
+/// underlying database errors.
 pub async fn get(pool: &PgPool, store_path: &str) -> Result<NarInfo> {
-  sqlx::query_as::<_, NarInfo>(
-    "SELECT * FROM narinfo_cache WHERE store_path = $1",
-  )
-  .bind(store_path)
-  .fetch_optional(pool)
-  .await
-  .map_err(CiError::Database)?
-  .ok_or_else(|| CiError::NotFound(format!("narinfo for {store_path}")))
+  let client = pool.get().await?;
+  q::get()
+    .bind(&client, &store_path)
+    .opt()
+    .await?
+    .map(NarInfo::from)
+    .ok_or_else(|| CiError::NotFound(format!("narinfo for {store_path}")))
 }
 
 /// Lookup by the first 32 base32 characters of the store path's hash.
@@ -103,14 +117,14 @@ pub async fn get_by_hash_part(
 ) -> Result<NarInfo> {
   // Nix store paths are `/nix/store/<32-chars>-<name>`; we match on the
   // 32-char hash part right after the prefix.
-  sqlx::query_as::<_, NarInfo>(
-    "SELECT * FROM narinfo_cache WHERE store_path LIKE $1",
-  )
-  .bind(format!("/nix/store/{hash_part}-%"))
-  .fetch_optional(pool)
-  .await
-  .map_err(CiError::Database)?
-  .ok_or_else(|| CiError::NotFound(format!("narinfo for hash {hash_part}")))
+  let client = pool.get().await?;
+  let pattern = format!("/nix/store/{hash_part}-%");
+  q::get_by_hash_part()
+    .bind(&client, &pattern)
+    .opt()
+    .await?
+    .map(NarInfo::from)
+    .ok_or_else(|| CiError::NotFound(format!("narinfo for hash {hash_part}")))
 }
 
 /// Lookup by the narinfo `URL` field, e.g. `nar/<hash>.nar.zst`.
@@ -121,25 +135,20 @@ pub async fn get_by_hash_part(
 /// # Errors
 /// Same as [`get`].
 pub async fn get_by_url(pool: &PgPool, url: &str) -> Result<NarInfo> {
-  sqlx::query_as::<_, NarInfo>(
-    "SELECT * FROM narinfo_cache WHERE url = $1 ORDER BY updated_at DESC \
-     LIMIT 1",
-  )
-  .bind(url)
-  .fetch_optional(pool)
-  .await
-  .map_err(CiError::Database)?
-  .ok_or_else(|| CiError::NotFound(format!("narinfo for URL {url}")))
+  let client = pool.get().await?;
+  q::get_by_url()
+    .bind(&client, &url)
+    .opt()
+    .await?
+    .map(NarInfo::from)
+    .ok_or_else(|| CiError::NotFound(format!("narinfo for URL {url}")))
 }
 
 /// Total rows. Cheap for admin and metrics surfaces.
 ///
 /// # Errors
-/// Returns the underlying sqlx error.
+/// Returns the underlying database error.
 pub async fn count(pool: &PgPool) -> Result<i64> {
-  let (n,) = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM narinfo_cache")
-    .fetch_one(pool)
-    .await
-    .map_err(CiError::Database)?;
-  Ok(n)
+  let client = pool.get().await?;
+  Ok(q::count().bind(&client).one().await?)
 }

@@ -1,12 +1,63 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use sqlx::PgPool;
+use circus_codegen::queries::builds as q;
 use uuid::Uuid;
 
 use crate::{
+  db::{PgPool, is_unique_violation},
   error::{CiError, Result},
   models::{Build, BuildStats, BuildStatus, CreateBuild},
 };
+
+impl From<q::BuildRow> for Build {
+  fn from(r: q::BuildRow) -> Self {
+    Self {
+      id:                         r.id,
+      evaluation_id:              r.evaluation_id,
+      job_name:                   r.job_name,
+      drv_path:                   r.drv_path,
+      status:                     BuildStatus::from_db_str(&r.status),
+      started_at:                 r.started_at,
+      completed_at:               r.completed_at,
+      log_path:                   r.log_path,
+      build_output_path:          r.build_output_path,
+      error_message:              r.error_message,
+      system:                     r.system,
+      priority:                   r.priority,
+      retry_count:                r.retry_count,
+      max_retries:                r.max_retries,
+      notification_pending_since: r.notification_pending_since,
+      created_at:                 r.created_at,
+      outputs:                    r.outputs,
+      is_aggregate:               r.is_aggregate,
+      constituents:               r.constituents,
+      builder_id:                 r.builder_id,
+      agent_machine_id:           r.agent_machine_id,
+      signed:                     r.signed,
+      keep:                       r.keep,
+      is_fod:                     r.is_fod,
+      fod_hash:                   r.fod_hash,
+      meta_description:           r.meta_description,
+      meta_license:               r.meta_license,
+      meta_homepage:              r.meta_homepage,
+      meta_maintainers:           r.meta_maintainers,
+      required_features:          r.required_features,
+    }
+  }
+}
+
+impl From<q::GetStats> for BuildStats {
+  fn from(r: q::GetStats) -> Self {
+    Self {
+      total_builds:         r.total_builds,
+      completed_builds:     r.completed_builds,
+      failed_builds:        r.failed_builds,
+      running_builds:       r.running_builds,
+      pending_builds:       r.pending_builds,
+      avg_duration_seconds: r.avg_duration_seconds,
+    }
+  }
+}
 
 /// Create a new build record in pending state.
 ///
@@ -16,40 +67,38 @@ use crate::{
 pub async fn create(pool: &PgPool, input: CreateBuild) -> Result<Build> {
   let is_aggregate = input.is_aggregate.unwrap_or(false);
   let is_fod = input.is_fod.unwrap_or(false);
-  sqlx::query_as::<_, Build>(
-    "INSERT INTO builds (evaluation_id, job_name, drv_path, status, system, \
-     outputs, is_aggregate, constituents, is_fod, fod_hash, meta_description, \
-     meta_license, meta_homepage, meta_maintainers, required_features) VALUES \
-     ($1, $2, $3, 'pending', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) \
-     RETURNING *",
-  )
-  .bind(input.evaluation_id)
-  .bind(&input.job_name)
-  .bind(&input.drv_path)
-  .bind(&input.system)
-  .bind(&input.outputs)
-  .bind(is_aggregate)
-  .bind(&input.constituents)
-  .bind(is_fod)
-  .bind(&input.fod_hash)
-  .bind(&input.meta_description)
-  .bind(&input.meta_license)
-  .bind(&input.meta_homepage)
-  .bind(&input.meta_maintainers)
-  .bind(&input.required_features)
-  .fetch_one(pool)
-  .await
-  .map_err(|e| {
-    match &e {
-      sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
+  let client = pool.get().await?;
+  q::create()
+    .bind(
+      &client,
+      &input.evaluation_id,
+      &input.job_name,
+      &input.drv_path,
+      &input.system,
+      &input.outputs,
+      &is_aggregate,
+      &input.constituents,
+      &is_fod,
+      &input.fod_hash,
+      &input.meta_description,
+      &input.meta_license,
+      &input.meta_homepage,
+      &input.meta_maintainers,
+      &input.required_features,
+    )
+    .one()
+    .await
+    .map(Build::from)
+    .map_err(|e| {
+      if is_unique_violation(&e) {
         CiError::Conflict(format!(
           "Build for job '{}' already exists in this evaluation",
           input.job_name
         ))
-      },
-      _ => CiError::Database(e),
-    }
-  })
+      } else {
+        CiError::Database(e)
+      }
+    })
 }
 
 /// Find a succeeded build by derivation path (for build result caching).
@@ -61,13 +110,14 @@ pub async fn get_completed_by_drv_path(
   pool: &PgPool,
   drv_path: &str,
 ) -> Result<Option<Build>> {
-  sqlx::query_as::<_, Build>(
-    "SELECT * FROM builds WHERE drv_path = $1 AND status = 'succeeded' LIMIT 1",
+  let client = pool.get().await?;
+  Ok(
+    q::get_completed_by_drv_path()
+      .bind(&client, &drv_path)
+      .opt()
+      .await?
+      .map(Build::from),
   )
-  .bind(drv_path)
-  .fetch_optional(pool)
-  .await
-  .map_err(CiError::Database)
 }
 
 /// Get a build by ID.
@@ -76,10 +126,12 @@ pub async fn get_completed_by_drv_path(
 ///
 /// Returns error if database query fails or build not found.
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<Build> {
-  sqlx::query_as::<_, Build>("SELECT * FROM builds WHERE id = $1")
-    .bind(id)
-    .fetch_optional(pool)
+  let client = pool.get().await?;
+  q::get()
+    .bind(&client, &id)
+    .opt()
     .await?
+    .map(Build::from)
     .ok_or_else(|| CiError::NotFound(format!("Build {id} not found")))
 }
 
@@ -92,13 +144,12 @@ pub async fn list_for_evaluation(
   pool: &PgPool,
   evaluation_id: Uuid,
 ) -> Result<Vec<Build>> {
-  sqlx::query_as::<_, Build>(
-    "SELECT * FROM builds WHERE evaluation_id = $1 ORDER BY created_at DESC",
-  )
-  .bind(evaluation_id)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)
+  let client = pool.get().await?;
+  let rows = q::list_for_evaluation()
+    .bind(&client, &evaluation_id)
+    .all()
+    .await?;
+  Ok(rows.into_iter().map(Build::from).collect())
 }
 
 /// List builds for a jobset across a bounded set of evaluations.
@@ -115,16 +166,12 @@ pub async fn list_for_jobset_evaluations(
     return Ok(Vec::new());
   }
 
-  sqlx::query_as::<_, Build>(
-    "SELECT b.* FROM builds b JOIN evaluations e ON b.evaluation_id = e.id \
-     WHERE e.jobset_id = $1 AND b.evaluation_id = ANY($2) ORDER BY b.job_name \
-     ASC, e.evaluation_time DESC",
-  )
-  .bind(jobset_id)
-  .bind(evaluation_ids)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)
+  let client = pool.get().await?;
+  let rows = q::list_for_jobset_evaluations()
+    .bind(&client, &jobset_id, &evaluation_ids)
+    .all()
+    .await?;
+  Ok(rows.into_iter().map(Build::from).collect())
 }
 
 /// List pending builds, prioritizing non-aggregate jobs.
@@ -140,27 +187,12 @@ pub async fn list_pending(
   limit: i64,
   schedulable_capacity: i32,
 ) -> Result<Vec<Build>> {
-  sqlx::query_as::<_, Build>(
-    "WITH running_counts AS ( SELECT e.jobset_id, COUNT(*) AS running FROM \
-     builds b JOIN evaluations e ON b.evaluation_id = e.id WHERE b.status = \
-     'running' GROUP BY e.jobset_id ), active_shares AS ( SELECT j.id AS \
-     jobset_id, j.scheduling_shares, COALESCE(rc.running, 0) AS running, \
-     SUM(j.scheduling_shares) OVER () AS total_shares FROM jobsets j JOIN \
-     evaluations e2 ON e2.jobset_id = j.id JOIN builds b2 ON b2.evaluation_id \
-     = e2.id AND b2.status = 'pending' LEFT JOIN running_counts rc ON \
-     rc.jobset_id = j.id WHERE j.scheduling_shares > 0 GROUP BY j.id, \
-     j.scheduling_shares, rc.running ) SELECT b.* FROM builds b JOIN \
-     evaluations e ON b.evaluation_id = e.id JOIN active_shares ash ON \
-     ash.jobset_id = e.jobset_id WHERE b.status = 'pending' ORDER BY \
-     b.priority DESC, (ash.scheduling_shares::float / \
-     GREATEST(ash.total_shares, 1) - ash.running::float / GREATEST($2, 1)) \
-     DESC, b.created_at ASC LIMIT $1",
-  )
-  .bind(limit)
-  .bind(schedulable_capacity)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)
+  let client = pool.get().await?;
+  let rows = q::list_pending()
+    .bind(&client, &schedulable_capacity, &limit)
+    .all()
+    .await?;
+  Ok(rows.into_iter().map(Build::from).collect())
 }
 
 /// Atomically claim a pending build by setting it to running.
@@ -170,16 +202,8 @@ pub async fn list_pending(
 ///
 /// Returns error if database update fails.
 pub async fn start(pool: &PgPool, id: Uuid) -> Result<Option<Build>> {
-  sqlx::query_as::<_, Build>(
-    "WITH candidate AS ( SELECT id FROM builds WHERE id = $1 AND status = \
-     'pending' FOR UPDATE SKIP LOCKED ) UPDATE builds SET status = 'running', \
-     started_at = NOW() FROM candidate WHERE builds.id = candidate.id \
-     RETURNING builds.*",
-  )
-  .bind(id)
-  .fetch_optional(pool)
-  .await
-  .map_err(CiError::Database)
+  let client = pool.get().await?;
+  Ok(q::start().bind(&client, &id).opt().await?.map(Build::from))
 }
 
 /// Record that a build-start notification has been attempted.
@@ -191,14 +215,8 @@ pub async fn start(pool: &PgPool, id: Uuid) -> Result<Option<Build>> {
 ///
 /// Returns an error if the database update fails.
 pub async fn mark_started_notified(pool: &PgPool, id: Uuid) -> Result<bool> {
-  let claimed = sqlx::query_scalar::<_, Uuid>(
-    "UPDATE builds SET started_notified_at = NOW() WHERE id = $1 AND \
-     started_notified_at IS NULL RETURNING id",
-  )
-  .bind(id)
-  .fetch_optional(pool)
-  .await
-  .map_err(CiError::Database)?;
+  let client = pool.get().await?;
+  let claimed = q::mark_started_notified().bind(&client, &id).opt().await?;
   Ok(claimed.is_some())
 }
 
@@ -211,16 +229,29 @@ pub async fn mark_started_notified(pool: &PgPool, id: Uuid) -> Result<bool> {
 ///
 /// Returns an error if the database update fails.
 pub async fn requeue(pool: &PgPool, id: Uuid) -> Result<Option<Build>> {
-  sqlx::query_as::<_, Build>(
-    "WITH bumped AS ( UPDATE builds SET status = 'pending', started_at = \
-     NULL, completed_at = NULL WHERE id = $1 AND status = 'running' RETURNING \
-     * ), cleared AS ( DELETE FROM build_steps WHERE build_id = $1 AND EXISTS \
-     (SELECT 1 FROM bumped) ) SELECT * FROM bumped",
+  let client = pool.get().await?;
+  Ok(
+    q::requeue()
+      .bind(&client, &id)
+      .opt()
+      .await?
+      .map(Build::from),
   )
-  .bind(id)
-  .fetch_optional(pool)
-  .await
-  .map_err(CiError::Database)
+}
+
+/// Return a failed build to the pending queue and increment its retry count.
+///
+/// # Errors
+///
+/// Returns an error if the database update fails or the build was not found.
+pub async fn retry(pool: &PgPool, id: Uuid) -> Result<Build> {
+  let client = pool.get().await?;
+  q::retry()
+    .bind(&client, &id)
+    .opt()
+    .await?
+    .map(Build::from)
+    .ok_or_else(|| CiError::NotFound(format!("Build {id} not found")))
 }
 
 /// Mark a build as completed with final status and outputs.
@@ -236,18 +267,20 @@ pub async fn complete(
   build_output_path: Option<&str>,
   error_message: Option<&str>,
 ) -> Result<Build> {
-  sqlx::query_as::<_, Build>(
-    "UPDATE builds SET status = $1, completed_at = NOW(), log_path = $2, \
-     build_output_path = $3, error_message = $4 WHERE id = $5 RETURNING *",
-  )
-  .bind(status)
-  .bind(log_path)
-  .bind(build_output_path)
-  .bind(error_message)
-  .bind(id)
-  .fetch_optional(pool)
-  .await?
-  .ok_or_else(|| CiError::NotFound(format!("Build {id} not found")))
+  let client = pool.get().await?;
+  q::complete()
+    .bind(
+      &client,
+      &status.as_db_str(),
+      &log_path,
+      &build_output_path,
+      &error_message,
+      &id,
+    )
+    .opt()
+    .await?
+    .map(Build::from)
+    .ok_or_else(|| CiError::NotFound(format!("Build {id} not found")))
 }
 
 /// List pending builds in scheduler order: highest priority first, then
@@ -263,15 +296,12 @@ pub async fn list_pending_in_scheduler_order(
   limit: i64,
   offset: i64,
 ) -> Result<Vec<Build>> {
-  sqlx::query_as::<_, Build>(
-    "SELECT * FROM builds WHERE status = 'pending' ORDER BY priority DESC, \
-     created_at ASC LIMIT $1 OFFSET $2",
-  )
-  .bind(limit)
-  .bind(offset)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)
+  let client = pool.get().await?;
+  let rows = q::list_pending_in_scheduler_order()
+    .bind(&client, &limit, &offset)
+    .all()
+    .await?;
+  Ok(rows.into_iter().map(Build::from).collect())
 }
 
 /// The set of system features any pending build for `system` requires.
@@ -287,15 +317,12 @@ pub async fn pending_feature_demand(
   pool: &PgPool,
   system: &str,
 ) -> Result<HashSet<String>> {
-  let rows = sqlx::query_as(
-    "SELECT DISTINCT unnest(required_features) FROM builds WHERE status = \
-     'pending' AND system = $1",
-  )
-  .bind(system)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)?;
-  Ok(rows.into_iter().map(|(feature,)| feature).collect())
+  let client = pool.get().await?;
+  let rows = q::pending_feature_demand()
+    .bind(&client, &system)
+    .all()
+    .await?;
+  Ok(rows.into_iter().collect())
 }
 
 /// Atomically increment a pending build's priority by `delta`. The row is
@@ -315,15 +342,14 @@ pub async fn bump_priority(
   id: Uuid,
   delta: i32,
 ) -> Result<Option<Build>> {
-  sqlx::query_as::<_, Build>(
-    "UPDATE builds SET priority = priority + $2 WHERE id = $1 AND status = \
-     'pending' RETURNING *",
+  let client = pool.get().await?;
+  Ok(
+    q::bump_priority()
+      .bind(&client, &delta, &id)
+      .opt()
+      .await?
+      .map(Build::from),
   )
-  .bind(id)
-  .bind(delta)
-  .fetch_optional(pool)
-  .await
-  .map_err(CiError::Database)
 }
 
 /// List recent builds ordered by creation time.
@@ -332,13 +358,9 @@ pub async fn bump_priority(
 ///
 /// Returns error if database query fails.
 pub async fn list_recent(pool: &PgPool, limit: i64) -> Result<Vec<Build>> {
-  sqlx::query_as::<_, Build>(
-    "SELECT * FROM builds ORDER BY created_at DESC LIMIT $1",
-  )
-  .bind(limit)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)
+  let client = pool.get().await?;
+  let rows = q::list_recent().bind(&client, &limit).all().await?;
+  Ok(rows.into_iter().map(Build::from).collect())
 }
 
 /// List all builds for a project.
@@ -350,15 +372,12 @@ pub async fn list_for_project(
   pool: &PgPool,
   project_id: Uuid,
 ) -> Result<Vec<Build>> {
-  sqlx::query_as::<_, Build>(
-    "SELECT b.* FROM builds b JOIN evaluations e ON b.evaluation_id = e.id \
-     JOIN jobsets j ON e.jobset_id = j.id WHERE j.project_id = $1 ORDER BY \
-     b.created_at DESC",
-  )
-  .bind(project_id)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)
+  let client = pool.get().await?;
+  let rows = q::list_for_project()
+    .bind(&client, &project_id)
+    .all()
+    .await?;
+  Ok(rows.into_iter().map(Build::from).collect())
 }
 
 /// Get aggregate build statistics.
@@ -367,11 +386,9 @@ pub async fn list_for_project(
 ///
 /// Returns error if database query fails.
 pub async fn get_stats(pool: &PgPool) -> Result<BuildStats> {
-  match sqlx::query_as::<_, BuildStats>("SELECT * FROM build_stats")
-    .fetch_optional(pool)
-    .await
-  {
-    Ok(Some(stats)) => Ok(stats),
+  let client = pool.get().await?;
+  match q::get_stats().bind(&client).opt().await {
+    Ok(Some(stats)) => Ok(BuildStats::from(stats)),
     Ok(None) => {
       tracing::warn!(
         "build_stats view returned no rows, returning default stats"
@@ -397,16 +414,10 @@ pub async fn reset_orphaned(
   pool: &PgPool,
   older_than_secs: i64,
 ) -> Result<u64> {
-  let result = sqlx::query(
-    "UPDATE builds SET status = 'pending', started_at = NULL WHERE status = \
-     'running' AND started_at < NOW() - make_interval(secs => $1)",
-  )
-  .bind(older_than_secs)
-  .execute(pool)
-  .await
-  .map_err(CiError::Database)?;
-
-  Ok(result.rows_affected())
+  let client = pool.get().await?;
+  #[expect(clippy::cast_precision_loss, reason = "interval seconds bind")]
+  let secs = older_than_secs as f64;
+  Ok(q::reset_orphaned().bind(&client, &secs).await?)
 }
 
 /// List builds with optional `evaluation_id`, status, system, and `job_name`
@@ -424,21 +435,20 @@ pub async fn list_filtered(
   limit: i64,
   offset: i64,
 ) -> Result<Vec<Build>> {
-  sqlx::query_as::<_, Build>(
-    "SELECT * FROM builds WHERE ($1::uuid IS NULL OR evaluation_id = $1) AND \
-     ($2::text IS NULL OR status = $2) AND ($3::text IS NULL OR system = $3) \
-     AND ($4::text IS NULL OR job_name ILIKE '%' || $4 || '%') ORDER BY \
-     created_at DESC LIMIT $5 OFFSET $6",
-  )
-  .bind(evaluation_id)
-  .bind(status)
-  .bind(system)
-  .bind(job_name)
-  .bind(limit)
-  .bind(offset)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)
+  let client = pool.get().await?;
+  let rows = q::list_filtered()
+    .bind(
+      &client,
+      &evaluation_id,
+      &status,
+      &system,
+      &job_name,
+      &limit,
+      &offset,
+    )
+    .all()
+    .await?;
+  Ok(rows.into_iter().map(Build::from).collect())
 }
 
 /// Count builds matching filter criteria.
@@ -453,19 +463,13 @@ pub async fn count_filtered(
   system: Option<&str>,
   job_name: Option<&str>,
 ) -> Result<i64> {
-  let row: (i64,) = sqlx::query_as(
-    "SELECT COUNT(*) FROM builds WHERE ($1::uuid IS NULL OR evaluation_id = \
-     $1) AND ($2::text IS NULL OR status = $2) AND ($3::text IS NULL OR \
-     system = $3) AND ($4::text IS NULL OR job_name ILIKE '%' || $4 || '%')",
+  let client = pool.get().await?;
+  Ok(
+    q::count_filtered()
+      .bind(&client, &evaluation_id, &status, &system, &job_name)
+      .one()
+      .await?,
   )
-  .bind(evaluation_id)
-  .bind(status)
-  .bind(system)
-  .bind(job_name)
-  .fetch_one(pool)
-  .await
-  .map_err(CiError::Database)?;
-  Ok(row.0)
 }
 
 /// Return the subset of the given build IDs whose status is 'cancelled'.
@@ -481,15 +485,13 @@ pub async fn get_cancelled_among(
   if build_ids.is_empty() {
     return Ok(Vec::new());
   }
-  let rows: Vec<(Uuid,)> = sqlx::query_as(
-    "SELECT id FROM builds WHERE id = ANY($1) AND status = 'cancelled'",
+  let client = pool.get().await?;
+  Ok(
+    q::get_cancelled_among()
+      .bind(&client, &build_ids)
+      .all()
+      .await?,
   )
-  .bind(build_ids)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)?;
-
-  Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
 /// Cancel a build.
@@ -498,18 +500,17 @@ pub async fn get_cancelled_among(
 ///
 /// Returns error if database update fails or build not in cancellable state.
 pub async fn cancel(pool: &PgPool, id: Uuid) -> Result<Build> {
-  sqlx::query_as::<_, Build>(
-    "UPDATE builds SET status = 'cancelled', completed_at = NOW() WHERE id = \
-     $1 AND status IN ('pending', 'running') RETURNING *",
-  )
-  .bind(id)
-  .fetch_optional(pool)
-  .await?
-  .ok_or_else(|| {
-    CiError::NotFound(format!(
-      "Build {id} not found or not in a cancellable state"
-    ))
-  })
+  let client = pool.get().await?;
+  q::cancel()
+    .bind(&client, &id)
+    .opt()
+    .await?
+    .map(Build::from)
+    .ok_or_else(|| {
+      CiError::NotFound(format!(
+        "Build {id} not found or not in a cancellable state"
+      ))
+    })
 }
 
 /// Cancel a build and all its transitive dependents.
@@ -528,15 +529,14 @@ pub async fn cancel_cascade(pool: &PgPool, id: Uuid) -> Result<Vec<Build>> {
   // Find and cancel all dependents recursively
   let mut to_cancel: Vec<Uuid> = vec![id];
   while let Some(build_id) = to_cancel.pop() {
-    let dependents: Vec<(Uuid,)> = sqlx::query_as(
-      "SELECT build_id FROM build_dependencies WHERE dependency_build_id = $1",
-    )
-    .bind(build_id)
-    .fetch_all(pool)
-    .await
-    .map_err(CiError::Database)?;
+    let client = pool.get().await?;
+    let dependents = q::cancel_cascade_dependents()
+      .bind(&client, &build_id)
+      .all()
+      .await
+      .map_err(CiError::Database)?;
 
-    for (dep_id,) in dependents {
+    for dep_id in dependents {
       if let Ok(build) = cancel(pool, dep_id).await {
         to_cancel.push(dep_id);
         cancelled.push(build);
@@ -554,21 +554,17 @@ pub async fn cancel_cascade(pool: &PgPool, id: Uuid) -> Result<Vec<Build>> {
 ///
 /// Returns error if database update fails or build not in restartable state.
 pub async fn restart(pool: &PgPool, id: Uuid) -> Result<Build> {
-  let build = sqlx::query_as::<_, Build>(
-    "UPDATE builds SET status = 'pending', started_at = NULL, completed_at = \
-     NULL, log_path = NULL, build_output_path = NULL, error_message = NULL, \
-     started_notified_at = NULL, retry_count = retry_count + 1 WHERE id = $1 \
-     AND status IN ('failed', 'succeeded', 'cancelled', 'cached_failure') \
-     RETURNING *",
-  )
-  .bind(id)
-  .fetch_optional(pool)
-  .await?
-  .ok_or_else(|| {
-    CiError::NotFound(format!(
-      "Build {id} not found or not in a restartable state"
-    ))
-  })?;
+  let client = pool.get().await?;
+  let build = q::restart()
+    .bind(&client, &id)
+    .opt()
+    .await?
+    .map(Build::from)
+    .ok_or_else(|| {
+      CiError::NotFound(format!(
+        "Build {id} not found or not in a restartable state"
+      ))
+    })?;
 
   if let Err(e) =
     super::failed_paths_cache::invalidate(pool, &build.drv_path).await
@@ -585,11 +581,8 @@ pub async fn restart(pool: &PgPool, id: Uuid) -> Result<Build> {
 ///
 /// Returns error if database update fails.
 pub async fn mark_signed(pool: &PgPool, id: Uuid) -> Result<()> {
-  sqlx::query("UPDATE builds SET signed = true WHERE id = $1")
-    .bind(id)
-    .execute(pool)
-    .await
-    .map_err(CiError::Database)?;
+  let client = pool.get().await?;
+  q::mark_signed().bind(&client, &id).await?;
   Ok(())
 }
 
@@ -602,22 +595,20 @@ pub async fn mark_signed(pool: &PgPool, id: Uuid) -> Result<()> {
 pub async fn get_completed_by_drv_paths(
   pool: &PgPool,
   drv_paths: &[String],
-) -> Result<std::collections::HashMap<String, Build>> {
+) -> Result<HashMap<String, Build>> {
   if drv_paths.is_empty() {
-    return Ok(std::collections::HashMap::new());
+    return Ok(HashMap::new());
   }
-  let builds = sqlx::query_as::<_, Build>(
-    "SELECT DISTINCT ON (drv_path) * FROM builds WHERE drv_path = ANY($1) AND \
-     status = 'succeeded' ORDER BY drv_path, completed_at DESC",
-  )
-  .bind(drv_paths)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)?;
+  let client = pool.get().await?;
+  let builds = q::get_completed_by_drv_paths()
+    .bind(&client, &drv_paths)
+    .all()
+    .await?;
 
   Ok(
     builds
       .into_iter()
+      .map(Build::from)
       .map(|b| (b.drv_path.clone(), b))
       .collect(),
   )
@@ -629,12 +620,9 @@ pub async fn get_completed_by_drv_paths(
 ///
 /// Returns error if database query fails.
 pub async fn list_pinned_ids(pool: &PgPool) -> Result<HashSet<Uuid>> {
-  let rows: Vec<(Uuid,)> =
-    sqlx::query_as("SELECT id FROM builds WHERE keep = true")
-      .fetch_all(pool)
-      .await
-      .map_err(CiError::Database)?;
-  Ok(rows.into_iter().map(|(id,)| id).collect())
+  let client = pool.get().await?;
+  let rows = q::list_pinned_ids().bind(&client).all().await?;
+  Ok(rows.into_iter().collect())
 }
 
 /// Set the `keep` (GC pin) flag on a build.
@@ -643,14 +631,13 @@ pub async fn list_pinned_ids(pool: &PgPool) -> Result<HashSet<Uuid>> {
 ///
 /// Returns error if database update fails or build not found.
 pub async fn set_keep(pool: &PgPool, id: Uuid, keep: bool) -> Result<Build> {
-  sqlx::query_as::<_, Build>(
-    "UPDATE builds SET keep = $1 WHERE id = $2 RETURNING *",
-  )
-  .bind(keep)
-  .bind(id)
-  .fetch_optional(pool)
-  .await?
-  .ok_or_else(|| CiError::NotFound(format!("Build {id} not found")))
+  let client = pool.get().await?;
+  q::set_keep()
+    .bind(&client, &keep, &id)
+    .opt()
+    .await?
+    .map(Build::from)
+    .ok_or_else(|| CiError::NotFound(format!("Build {id} not found")))
 }
 
 /// Set the `builder_id` for a build.
@@ -663,12 +650,8 @@ pub async fn set_builder(
   id: Uuid,
   builder_id: Uuid,
 ) -> Result<()> {
-  sqlx::query("UPDATE builds SET builder_id = $1 WHERE id = $2")
-    .bind(builder_id)
-    .bind(id)
-    .execute(pool)
-    .await
-    .map_err(CiError::Database)?;
+  let client = pool.get().await?;
+  q::set_builder().bind(&client, &builder_id, &id).await?;
   Ok(())
 }
 
@@ -682,12 +665,8 @@ pub async fn set_agent(
   id: Uuid,
   machine_id: Uuid,
 ) -> Result<()> {
-  sqlx::query("UPDATE builds SET agent_machine_id = $1 WHERE id = $2")
-    .bind(machine_id)
-    .bind(id)
-    .execute(pool)
-    .await
-    .map_err(CiError::Database)?;
+  let client = pool.get().await?;
+  q::set_agent().bind(&client, &machine_id, &id).await?;
   Ok(())
 }
 
@@ -700,14 +679,12 @@ pub async fn list_constituents(
   pool: &PgPool,
   build_id: Uuid,
 ) -> Result<Vec<Build>> {
-  sqlx::query_as::<_, Build>(
-    "SELECT b.* FROM builds b JOIN build_dependencies bd ON b.id = \
-     bd.dependency_build_id WHERE bd.build_id = $1 ORDER BY b.created_at",
-  )
-  .bind(build_id)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)
+  let client = pool.get().await?;
+  let rows = q::list_constituents()
+    .bind(&client, &build_id)
+    .all()
+    .await?;
+  Ok(rows.into_iter().map(Build::from).collect())
 }
 
 /// Delete a build by ID.
@@ -716,14 +693,10 @@ pub async fn list_constituents(
 ///
 /// Returns error if database query fails or build not found.
 pub async fn delete(pool: &PgPool, id: Uuid) -> Result<()> {
-  let result = sqlx::query("DELETE FROM builds WHERE id = $1")
-    .bind(id)
-    .execute(pool)
-    .await?;
-
-  if result.rows_affected() == 0 {
+  let client = pool.get().await?;
+  let affected = q::delete().bind(&client, &id).await?;
+  if affected == 0 {
     return Err(CiError::NotFound(format!("Build {id} not found")));
   }
-
   Ok(())
 }

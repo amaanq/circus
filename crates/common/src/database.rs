@@ -1,11 +1,12 @@
 //! Database connection and pool management
 
-use std::time::Duration;
-
-use sqlx::{PgPool, Row, postgres::PgPoolOptions};
+use circus_codegen::queries::{database as database_q, health as health_q};
 use tracing::{debug, info, warn};
 
-use crate::config::DatabaseConfig;
+use crate::{
+  config::DatabaseConfig,
+  db::{self, PgPool},
+};
 
 pub struct Database {
   pool: PgPool,
@@ -20,14 +21,7 @@ impl Database {
   pub async fn new(config: DatabaseConfig) -> color_eyre::Result<Self> {
     info!("Initializing database connection pool");
 
-    let pool = PgPoolOptions::new()
-      .max_connections(config.max_connections)
-      .min_connections(config.min_connections)
-      .acquire_timeout(Duration::from_secs(config.connect_timeout))
-      .idle_timeout(Duration::from_secs(config.idle_timeout))
-      .max_lifetime(Duration::from_secs(config.max_lifetime))
-      .connect(&config.url)
-      .await?;
+    let pool = db::build_pool(&config.url, config.max_connections as usize)?;
 
     // Test the connection
     Self::health_check(&pool).await?;
@@ -51,7 +45,8 @@ impl Database {
   pub async fn health_check(pool: &PgPool) -> color_eyre::Result<()> {
     debug!("Performing database health check");
 
-    let result: i32 = sqlx::query_scalar("SELECT 1").fetch_one(pool).await?;
+    let client = pool.get().await?;
+    let result = health_q::check().bind(&client).one().await?;
 
     if result != 1 {
       return Err(color_eyre::eyre::eyre!(
@@ -64,9 +59,10 @@ impl Database {
   }
 
   /// Close the connection pool gracefully.
+  #[expect(clippy::unused_async, reason = "callers await close()")]
   pub async fn close(&self) {
     info!("Closing database connection pool");
-    self.pool.close().await;
+    self.pool.close();
   }
 
   /// Query database metadata (version, user, address).
@@ -77,37 +73,28 @@ impl Database {
   pub async fn get_connection_info(
     &self,
   ) -> color_eyre::Result<ConnectionInfo> {
-    let row = sqlx::query(
-      r"
-            SELECT 
-                current_database() as database,
-                current_user as user,
-                version() as version,
-                inet_server_addr() as server_ip,
-                inet_server_port() as server_port
-            ",
-    )
-    .fetch_one(&self.pool)
-    .await?;
+    let client = self.pool.get().await?;
+    let row = database_q::connection_info().bind(&client).one().await?;
 
     Ok(ConnectionInfo {
-      database:    row.get("database"),
-      user:        row.get("user"),
-      version:     row.get("version"),
-      server_ip:   row.get("server_ip"),
-      server_port: row.get("server_port"),
+      database:    row.database,
+      user:        row.user,
+      version:     row.version,
+      server_ip:   row.server_ip,
+      server_port: row.server_port,
     })
   }
 
   /// Get current connection pool statistics (size, idle, active).
   #[must_use]
   pub fn get_pool_stats(&self) -> PoolStats {
-    let pool = &self.pool;
-
+    let status = self.pool.status();
+    let size = status.size as u32;
+    let idle = u32::try_from(status.available).unwrap_or(0);
     PoolStats {
-      size:   pool.size(),
-      idle:   pool.num_idle() as u32,
-      active: (pool.size() - pool.num_idle() as u32),
+      size,
+      idle,
+      active: size.saturating_sub(idle),
     }
   }
 }

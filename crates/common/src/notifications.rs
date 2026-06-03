@@ -5,11 +5,11 @@ use std::{
   time::{SystemTime, UNIX_EPOCH},
 };
 
-use sqlx::PgPool;
 use tracing::{error, info, warn};
 
 use crate::{
   config::{EmailConfig, NotificationsConfig},
+  db::PgPool,
   models::{Build, BuildStatus, Project},
   repo,
 };

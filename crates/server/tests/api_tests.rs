@@ -8,27 +8,20 @@ use axum::{
 };
 use tower::ServiceExt;
 
-async fn get_pool() -> Option<sqlx::PgPool> {
+async fn get_pool() -> Option<circus_common::PgPool> {
   let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
     println!("Skipping API test: TEST_DATABASE_URL not set");
     return None;
   };
 
-  let pool = sqlx::postgres::PgPoolOptions::new()
-    .max_connections(5)
-    .connect(&url)
-    .await
-    .ok()?;
+  let pool = circus_common::db::build_pool(&url, 5).ok()?;
 
-  sqlx::migrate!("../common/migrations")
-    .run(&pool)
-    .await
-    .ok()?;
+  circus_common::run_migrations(&url).await.ok()?;
 
   Some(pool)
 }
 
-fn build_app(pool: sqlx::PgPool) -> axum::Router {
+fn build_app(pool: circus_common::PgPool) -> axum::Router {
   let config = circus_common::config::Config::default();
   let server_config = config.server.clone();
   let state = circus_server::state::AppState {
@@ -65,7 +58,7 @@ async fn test_router_no_duplicate_routes() {
 }
 
 fn build_app_with_config(
-  pool: sqlx::PgPool,
+  pool: circus_common::PgPool,
   config: circus_common::config::Config,
 ) -> axum::Router {
   let server_config = config.server.clone();

@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
 use circus_common::{
+  PgPool,
   config::Config,
   models::{ApiKey, User},
 };
@@ -8,7 +9,6 @@ use dashmap::DashMap;
 use hmac::KeyInit;
 use moka::sync::Cache;
 use regex::Regex;
-use sqlx::PgPool;
 
 /// Maximum lifetime for legacy in-memory API-key dashboard sessions.
 const SESSION_MAX_AGE: std::time::Duration =

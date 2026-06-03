@@ -5,6 +5,7 @@ pub mod audit;
 pub mod config;
 pub mod crypto;
 pub mod database;
+pub mod db;
 pub mod error;
 pub mod gc_roots;
 pub mod log_storage;
@@ -27,6 +28,13 @@ pub mod validation;
 pub use config::*;
 pub use crypto::install_crypto_provider;
 pub use database::*;
+pub use db::{
+  DbClient,
+  GenericClient,
+  PgPool,
+  build_pool,
+  is_unique_violation,
+};
 pub use error::*;
 pub use migrate::*;
 pub use models::*;

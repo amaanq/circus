@@ -2,24 +2,19 @@
 //! Requires `TEST_DATABASE_URL` to be set to a `PostgreSQL` connection string.
 #![expect(clippy::expect_used, clippy::print_stdout, reason = "Fine in tests")]
 
-use circus_common::{BuildStatus, models::*, repo, repo::search::*};
+use circus_common::{BuildStatus, PgPool, models::*, repo, repo::search::*};
 use uuid::Uuid;
 
-async fn get_pool() -> Option<sqlx::PgPool> {
+async fn get_pool() -> Option<PgPool> {
   let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
     println!("Skipping search test: TEST_DATABASE_URL not set");
     return None;
   };
 
-  let pool = sqlx::postgres::PgPoolOptions::new()
-    .max_connections(5)
-    .connect(&url)
-    .await
-    .ok()?;
-
   // Run migrations
-  sqlx::migrate!("./migrations").run(&pool).await.ok()?;
+  circus_migrations::run_migrations(&url).await.ok()?;
 
+  let pool = circus_common::db::build_pool(&url, 5).ok()?;
   Some(pool)
 }
 

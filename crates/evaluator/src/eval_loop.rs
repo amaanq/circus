@@ -2,6 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use circus_common::{
+  PgPool,
   config::EvaluatorConfig,
   error::{CiError, check_disk_space},
   models::{
@@ -19,7 +20,6 @@ use circus_common::{
 };
 use color_eyre::eyre::Context;
 use futures::stream::{self, StreamExt};
-use sqlx::PgPool;
 use tokio::sync::Notify;
 use tracing::info;
 use uuid::Uuid;

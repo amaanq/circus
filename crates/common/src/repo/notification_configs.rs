@@ -1,11 +1,25 @@
-use sqlx::PgPool;
+use circus_codegen::queries::notification_configs as q;
 use uuid::Uuid;
 
 use crate::{
   config::DeclarativeNotification,
+  db::{PgPool, is_unique_violation},
   error::{CiError, Result},
   models::{CreateNotificationConfig, NotificationConfig},
 };
+
+impl From<q::NotificationConfigRow> for NotificationConfig {
+  fn from(r: q::NotificationConfigRow) -> Self {
+    Self {
+      id:                r.id,
+      project_id:        r.project_id,
+      notification_type: r.notification_type,
+      config:            r.config,
+      enabled:           r.enabled,
+      created_at:        r.created_at,
+    }
+  }
+}
 
 /// Create a new notification config.
 ///
@@ -16,26 +30,27 @@ pub async fn create(
   pool: &PgPool,
   input: CreateNotificationConfig,
 ) -> Result<NotificationConfig> {
-  sqlx::query_as::<_, NotificationConfig>(
-    "INSERT INTO notification_configs (project_id, notification_type, config) \
-     VALUES ($1, $2, $3) RETURNING *",
-  )
-  .bind(input.project_id)
-  .bind(&input.notification_type)
-  .bind(&input.config)
-  .fetch_one(pool)
-  .await
-  .map_err(|e| {
-    match &e {
-      sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
+  let client = pool.get().await?;
+  q::create()
+    .bind(
+      &client,
+      &input.project_id,
+      &input.notification_type,
+      &input.config,
+    )
+    .one()
+    .await
+    .map(NotificationConfig::from)
+    .map_err(|e| {
+      if is_unique_violation(&e) {
         CiError::Conflict(format!(
           "Notification config '{}' already exists for this project",
           input.notification_type
         ))
-      },
-      _ => CiError::Database(e),
-    }
-  })
+      } else {
+        CiError::Database(e)
+      }
+    })
 }
 
 /// List all enabled notification configs for a project.
@@ -47,14 +62,12 @@ pub async fn list_for_project(
   pool: &PgPool,
   project_id: Uuid,
 ) -> Result<Vec<NotificationConfig>> {
-  sqlx::query_as::<_, NotificationConfig>(
-    "SELECT * FROM notification_configs WHERE project_id = $1 AND enabled = \
-     true ORDER BY created_at DESC",
-  )
-  .bind(project_id)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)
+  let client = pool.get().await?;
+  let rows = q::list_for_project()
+    .bind(&client, &project_id)
+    .all()
+    .await?;
+  Ok(rows.into_iter().map(NotificationConfig::from).collect())
 }
 
 /// Delete a notification config for a project.
@@ -67,14 +80,11 @@ pub async fn delete_for_project(
   project_id: Uuid,
   id: Uuid,
 ) -> Result<()> {
-  let result = sqlx::query(
-    "DELETE FROM notification_configs WHERE project_id = $1 AND id = $2",
-  )
-  .bind(project_id)
-  .bind(id)
-  .execute(pool)
-  .await?;
-  if result.rows_affected() == 0 {
+  let client = pool.get().await?;
+  let affected = q::delete_for_project()
+    .bind(&client, &project_id, &id)
+    .await?;
+  if affected == 0 {
     return Err(CiError::NotFound(format!(
       "Notification config {id} not found"
     )));
@@ -94,19 +104,14 @@ pub async fn upsert(
   config: &serde_json::Value,
   enabled: bool,
 ) -> Result<NotificationConfig> {
-  sqlx::query_as::<_, NotificationConfig>(
-    "INSERT INTO notification_configs (project_id, notification_type, config, \
-     enabled) VALUES ($1, $2, $3, $4) ON CONFLICT (project_id, \
-     notification_type) DO UPDATE SET config = EXCLUDED.config, enabled = \
-     EXCLUDED.enabled RETURNING *",
+  let client = pool.get().await?;
+  Ok(
+    q::upsert()
+      .bind(&client, &project_id, &notification_type, config, &enabled)
+      .one()
+      .await
+      .map(NotificationConfig::from)?,
   )
-  .bind(project_id)
-  .bind(notification_type)
-  .bind(config)
-  .bind(enabled)
-  .fetch_one(pool)
-  .await
-  .map_err(CiError::Database)
 }
 
 /// Sync notification configs from declarative config.
@@ -127,15 +132,10 @@ pub async fn sync_for_project(
     .collect();
 
   // Delete notification configs not in declarative config
-  sqlx::query(
-    "DELETE FROM notification_configs WHERE project_id = $1 AND \
-     notification_type != ALL($2::text[])",
-  )
-  .bind(project_id)
-  .bind(&types)
-  .execute(pool)
-  .await
-  .map_err(CiError::Database)?;
+  let client = pool.get().await?;
+  q::sync_for_project_delete()
+    .bind(&client, &project_id, &types)
+    .await?;
 
   // Upsert each notification config
   for notification in notifications {

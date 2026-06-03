@@ -7,11 +7,11 @@
 use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
   config::{DeclarativeConfig, DeclarativeWebhook},
+  db::PgPool,
   error::Result,
   models::{CreateJobset, CreateProject, JobsetState, JobsetTriggerMode},
   repo,
@@ -399,12 +399,20 @@ pub async fn run(pool: &PgPool, config: &DeclarativeConfig) -> Result<()> {
 
   // Wake the evaluator so it picks up newly bootstrapped jobsets immediately
   // instead of waiting for the next poll interval.
-  if let Err(e) = sqlx::query("SELECT pg_notify($1, '')")
-    .bind(crate::pg_notify::CHANNEL_JOBSETS_CHANGED)
-    .execute(pool)
-    .await
-  {
-    tracing::warn!("Failed to notify evaluator after bootstrap: {e}");
+  match pool.get().await {
+    Ok(client) => {
+      if let Err(e) = client
+        .execute("SELECT pg_notify($1, '')", &[
+          &crate::pg_notify::CHANNEL_JOBSETS_CHANGED,
+        ])
+        .await
+      {
+        tracing::warn!("Failed to notify evaluator after bootstrap: {e}");
+      }
+    },
+    Err(e) => {
+      tracing::warn!("Failed to acquire connection to notify evaluator: {e}");
+    },
   }
 
   tracing::info!("Declarative bootstrap complete");

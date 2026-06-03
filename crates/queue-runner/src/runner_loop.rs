@@ -1,11 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
 use circus_common::{
+  PgPool,
   config::HotConfig,
   models::{Build, BuildStatus, EvaluationTriggerKind, JobsetState},
   repo,
 };
-use sqlx::PgPool;
 use tokio::sync::{Notify, RwLock};
 
 use crate::{dispatch::supports_required_features, worker::WorkerPool};

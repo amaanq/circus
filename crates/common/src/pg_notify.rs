@@ -1,10 +1,19 @@
-// Wraps `sqlx::postgres::PgListener` to subscribe to notification channels
-// and signal an `Arc<tokio::sync::Notify>` when events arrive. Daemons use
-// this to wake immediately instead of waiting for the next poll interval.
-use std::sync::Arc;
+// Subscribes to Postgres LISTEN/NOTIFY channels on a dedicated tokio-postgres
+// connection and signals an `Arc<tokio::sync::Notify>` when events arrive.
+// Daemons use this to wake immediately instead of waiting for the next poll
+// interval.
+//
+// A pooled (deadpool) connection cannot be used here: the pool drives each
+// connection's message stream internally and discards async notifications, so
+// LISTEN payloads never surface. We therefore open and drive our own
+// connection and read `AsyncMessage::Notification` off its message stream.
+use std::{sync::Arc, time::Duration};
 
-use sqlx::PgPool;
+use futures::{StreamExt as _, stream};
 use tokio::{sync::Notify, task::JoinHandle};
+use tokio_postgres::{AsyncMessage, NoTls};
+
+use crate::db::TlsMode;
 
 /// Channel emitted on `builds` INSERT or status UPDATE.
 pub const CHANNEL_BUILDS_CHANGED: &str = "circus_builds_changed";
@@ -17,43 +26,103 @@ pub const CHANNEL_JOBSETS_CHANGED: &str = "circus_jobsets_changed";
 /// while the daemon is mid-cycle still wakes the next `.notified()` await.
 /// Reconnects with 5s backoff on connection loss.
 pub fn spawn_listener(
-  pool: &PgPool,
+  database_url: &str,
   channels: &[&str],
   wakeup: Arc<Notify>,
 ) -> JoinHandle<()> {
-  let pool = pool.clone();
+  let database_url = database_url.to_owned();
   let channels: Vec<String> =
     channels.iter().map(|s| (*s).to_owned()).collect();
 
   tokio::spawn(async move {
     loop {
-      if let Err(e) = listen_loop(&pool, &channels, &wakeup).await {
+      if let Err(e) = listen_loop(&database_url, &channels, &wakeup).await {
         tracing::warn!("PG LISTEN connection lost: {e}, reconnecting in 5s");
       }
-      tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+      tokio::time::sleep(Duration::from_secs(5)).await;
     }
   })
 }
 
-/// Core listen loop: connects, subscribes, and dispatches notifications.
+/// Core listen loop: connects, subscribes, and dispatches notifications. The
+/// connection's message stream is driven on its own task; query progress and
+/// notification delivery both flow through it.
 async fn listen_loop(
-  pool: &PgPool,
+  database_url: &str,
   channels: &[String],
   wakeup: &Notify,
-) -> Result<(), sqlx::Error> {
-  let mut listener = sqlx::postgres::PgListener::connect_with(pool).await?;
+) -> Result<(), tokio_postgres::Error> {
+  let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
-  let channel_refs: Vec<&str> = channels.iter().map(String::as_str).collect();
-  listener.listen_all(channel_refs).await?;
+  let driver = match crate::db::tls_mode(database_url) {
+    TlsMode::Disable => {
+      let (client, conn) = tokio_postgres::connect(database_url, NoTls).await?;
+      let driver = spawn_driver(conn, tx);
+      subscribe(&client, channels).await?;
+      driver
+    },
+    mode => {
+      let connector = circus_migrations::tls::tls_connector(mode);
+      let (client, conn) =
+        tokio_postgres::connect(database_url, connector).await?;
+      let driver = spawn_driver(conn, tx);
+      subscribe(&client, channels).await?;
+      driver
+    },
+  };
 
   tracing::info!(channels = ?channels, "PG LISTEN subscribed");
 
-  loop {
-    listener.recv().await?;
-    // notify_one deposits a permit so notifications arriving while the daemon
-    // is busy aren't lost.
+  // Each forwarded message is a notification; `notify_one` deposits a permit
+  // so events arriving while the daemon is busy aren't lost. When the driver
+  // task ends (connection dropped), the channel closes and we return to
+  // reconnect.
+  while rx.recv().await.is_some() {
     wakeup.notify_one();
   }
+
+  driver.abort();
+  Ok(())
+}
+
+/// Drive the connection's message stream on a background task, forwarding one
+/// unit per notification. Returns the task handle.
+fn spawn_driver<S>(
+  mut connection: tokio_postgres::Connection<tokio_postgres::Socket, S>,
+  tx: tokio::sync::mpsc::UnboundedSender<()>,
+) -> JoinHandle<()>
+where
+  S: tokio_postgres::tls::TlsStream + Unpin + Send + 'static,
+{
+  tokio::spawn(async move {
+    let mut messages = stream::poll_fn(move |cx| connection.poll_message(cx));
+    while let Some(msg) = messages.next().await {
+      match msg {
+        Ok(AsyncMessage::Notification(_)) => {
+          if tx.send(()).is_err() {
+            break;
+          }
+        },
+        Ok(_) => {},
+        Err(_) => break,
+      }
+    }
+  })
+}
+
+async fn subscribe(
+  client: &tokio_postgres::Client,
+  channels: &[String],
+) -> Result<(), tokio_postgres::Error> {
+  for channel in channels {
+    // Channel names are fixed lowercase identifiers (see the assertions
+    // below); quote to bind the exact name pg_notify() emits.
+    let quoted = channel.replace('"', "\"\"");
+    client
+      .batch_execute(&format!("LISTEN \"{quoted}\""))
+      .await?;
+  }
+  Ok(())
 }
 
 #[cfg(test)]

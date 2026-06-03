@@ -10,11 +10,11 @@ use std::net::SocketAddr;
 
 use axum::{extract::ConnectInfo, http::Extensions};
 use circus_common::{
+  PgPool,
   audit::{self, Actor, AuditRecord},
   models::{ApiKey, User},
 };
 use serde_json::Value;
-use sqlx::PgPool;
 
 /// Extract the acting principal from request extensions. Returns
 /// `Actor::anonymous()` when neither a User nor an `ApiKey` is present (for

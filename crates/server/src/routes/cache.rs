@@ -44,36 +44,16 @@ fn first_path_info_entry(
 /// signed at build time. This intentionally does not fall back to arbitrary
 /// `/nix/store` paths.
 async fn find_signed_store_path(
-  pool: &sqlx::PgPool,
+  pool: &circus_common::PgPool,
   hash: &str,
   store_dir: &str,
 ) -> std::result::Result<Option<String>, ApiError> {
   let store_dir = store_dir.trim_end_matches('/');
   let like_pattern = format!("{store_dir}/{hash}-%");
 
-  let path: Option<String> = sqlx::query_scalar(
-    "SELECT bp.path FROM build_products bp JOIN builds b ON b.id = \
-     bp.build_id WHERE bp.path LIKE $1 AND b.signed = true LIMIT 1",
-  )
-  .bind(&like_pattern)
-  .fetch_optional(pool)
-  .await
-  .map_err(|e| ApiError(circus_common::CiError::Database(e)))?;
-
-  if path.is_some() {
-    return Ok(path);
-  }
-
-  let from_builds = sqlx::query_scalar(
-    "SELECT build_output_path FROM builds WHERE build_output_path LIKE $1 AND \
-     signed = true LIMIT 1",
-  )
-  .bind(&like_pattern)
-  .fetch_optional(pool)
-  .await
-  .map_err(|e| ApiError(circus_common::CiError::Database(e)))?;
-
-  Ok(from_builds)
+  circus_common::repo::cache::find_signed_store_path(pool, &like_pattern)
+    .await
+    .map_err(ApiError)
 }
 
 fn narinfo_has_signature(
@@ -92,7 +72,7 @@ fn narinfo_has_signature(
 /// FIXME: this shells out to `nix`, and needs the nix-command feature. We
 /// should bind to the Nix C/C++ API and call it directly instead.
 async fn resolve_servable_path(
-  pool: &sqlx::PgPool,
+  pool: &circus_common::PgPool,
   hash: &str,
   store_dir: &str,
 ) -> std::result::Result<Option<(String, bool)>, ApiError> {

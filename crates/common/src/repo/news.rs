@@ -1,10 +1,23 @@
-use sqlx::PgPool;
+use circus_codegen::queries::news as q;
 use uuid::Uuid;
 
 use crate::{
+  db::PgPool,
   error::{CiError, Result},
   models::{CreateNewsItem, NewsItem},
 };
+
+impl From<q::NewsRow> for NewsItem {
+  fn from(r: q::NewsRow) -> Self {
+    Self {
+      id:         r.id,
+      title:      r.title,
+      content:    r.content,
+      created_by: r.created_by,
+      created_at: r.created_at,
+    }
+  }
+}
 
 /// Create a news/announcement item.
 ///
@@ -12,16 +25,14 @@ use crate::{
 ///
 /// Returns error if database insert fails.
 pub async fn create(pool: &PgPool, input: CreateNewsItem) -> Result<NewsItem> {
-  sqlx::query_as::<_, NewsItem>(
-    "INSERT INTO news (title, content, created_by) VALUES ($1, $2, $3) \
-     RETURNING *",
+  let client = pool.get().await?;
+  Ok(
+    q::create()
+      .bind(&client, &input.title, &input.content, &input.created_by)
+      .one()
+      .await
+      .map(NewsItem::from)?,
   )
-  .bind(&input.title)
-  .bind(&input.content)
-  .bind(input.created_by)
-  .fetch_one(pool)
-  .await
-  .map_err(CiError::Database)
 }
 
 /// List news items, most recent first.
@@ -34,14 +45,9 @@ pub async fn list(
   limit: i64,
   offset: i64,
 ) -> Result<Vec<NewsItem>> {
-  sqlx::query_as::<_, NewsItem>(
-    "SELECT * FROM news ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-  )
-  .bind(limit)
-  .bind(offset)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)
+  let client = pool.get().await?;
+  let rows = q::list().bind(&client, &limit, &offset).all().await?;
+  Ok(rows.into_iter().map(NewsItem::from).collect())
 }
 
 /// Count total news items.
@@ -50,11 +56,8 @@ pub async fn list(
 ///
 /// Returns error if database query fails.
 pub async fn count(pool: &PgPool) -> Result<i64> {
-  let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM news")
-    .fetch_one(pool)
-    .await
-    .map_err(CiError::Database)?;
-  Ok(row.0)
+  let client = pool.get().await?;
+  Ok(q::count().bind(&client).one().await?)
 }
 
 /// Delete a news item by ID.
@@ -63,11 +66,9 @@ pub async fn count(pool: &PgPool) -> Result<i64> {
 ///
 /// Returns error if database delete fails or item not found.
 pub async fn delete(pool: &PgPool, id: Uuid) -> Result<()> {
-  let result = sqlx::query("DELETE FROM news WHERE id = $1")
-    .bind(id)
-    .execute(pool)
-    .await?;
-  if result.rows_affected() == 0 {
+  let client = pool.get().await?;
+  let affected = q::delete().bind(&client, &id).await?;
+  if affected == 0 {
     return Err(CiError::NotFound(format!("News item {id} not found")));
   }
   Ok(())

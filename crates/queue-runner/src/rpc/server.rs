@@ -16,6 +16,7 @@ use std::{
 
 use capnp::capability::Promise;
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
+use circus_common::{PgPool, repo};
 use circus_proto::{
   PROTO_VERSION,
   agent_session,
@@ -27,7 +28,6 @@ use circus_proto::{
 };
 use color_eyre::eyre::{Context as _, eyre};
 use sha2::{Digest as _, Sha256};
-use sqlx::PgPool;
 use subtle::ConstantTimeEq as _;
 use tokio::{
   net::TcpListener,
@@ -1135,47 +1135,28 @@ async fn upsert_session(
   speed: f32,
   cpu: i32,
   max_jobs: i32,
-) -> Result<(), sqlx::Error> {
-  sqlx::query(
-    "INSERT INTO builder_sessions (machine_id, name, hostname, systems, \
-     supported_features, mandatory_features, speed_factor, cpu_count, \
-     max_jobs, proto_version, connected, last_seen, updated_at) VALUES ($1, \
-     $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE, NOW(), NOW()) ON CONFLICT \
-     (machine_id) DO UPDATE SET name = EXCLUDED.name, hostname = \
-     EXCLUDED.hostname, systems = EXCLUDED.systems, supported_features = \
-     EXCLUDED.supported_features, mandatory_features = \
-     EXCLUDED.mandatory_features, speed_factor = EXCLUDED.speed_factor, \
-     cpu_count = EXCLUDED.cpu_count, max_jobs = EXCLUDED.max_jobs, \
-     proto_version = EXCLUDED.proto_version, connected = TRUE, last_seen = \
-     NOW(), updated_at = NOW()",
+) -> Result<(), circus_common::CiError> {
+  repo::builder_sessions::register(
+    pool,
+    machine_id,
+    name,
+    hostname,
+    systems,
+    supported,
+    mandatory,
+    speed,
+    cpu,
+    max_jobs,
+    PROTO_VERSION,
   )
-  .bind(machine_id)
-  .bind(name)
-  .bind(hostname)
-  .bind(systems)
-  .bind(supported)
-  .bind(mandatory)
-  .bind(speed)
-  .bind(cpu)
-  .bind(max_jobs)
-  .bind(PROTO_VERSION)
-  .execute(pool)
-  .await?;
-  Ok(())
+  .await
 }
 
 async fn mark_disconnected(
   pool: &PgPool,
   machine_id: Uuid,
-) -> Result<(), sqlx::Error> {
-  sqlx::query(
-    "UPDATE builder_sessions SET connected = FALSE, updated_at = NOW() WHERE \
-     machine_id = $1",
-  )
-  .bind(machine_id)
-  .execute(pool)
-  .await?;
-  Ok(())
+) -> Result<(), circus_common::CiError> {
+  repo::builder_sessions::mark_disconnected(pool, machine_id).await
 }
 
 #[cfg(test)]

@@ -1,10 +1,24 @@
-use sqlx::PgPool;
+use circus_codegen::queries::projects as q;
 use uuid::Uuid;
 
 use crate::{
+  db::{PgPool, is_unique_violation},
   error::{CiError, Result},
   models::{CreateProject, Project, UpdateProject},
 };
+
+impl From<q::ProjectRow> for Project {
+  fn from(r: q::ProjectRow) -> Self {
+    Self {
+      id:             r.id,
+      name:           r.name,
+      description:    r.description,
+      repository_url: r.repository_url,
+      created_at:     r.created_at,
+      updated_at:     r.updated_at,
+    }
+  }
+}
 
 /// Create a new project.
 ///
@@ -12,23 +26,24 @@ use crate::{
 ///
 /// Returns error if database insert fails or project name already exists.
 pub async fn create(pool: &PgPool, input: CreateProject) -> Result<Project> {
-  sqlx::query_as::<_, Project>(
-    "INSERT INTO projects (name, description, repository_url) VALUES ($1, $2, \
-     $3) RETURNING *",
-  )
-  .bind(&input.name)
-  .bind(&input.description)
-  .bind(&input.repository_url)
-  .fetch_one(pool)
-  .await
-  .map_err(|e| {
-    match &e {
-      sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
+  let client = pool.get().await?;
+  q::create()
+    .bind(
+      &client,
+      &input.name,
+      &input.description,
+      &input.repository_url,
+    )
+    .one()
+    .await
+    .map(Project::from)
+    .map_err(|e| {
+      if is_unique_violation(&e) {
         CiError::Conflict(format!("Project '{}' already exists", input.name))
-      },
-      _ => CiError::Database(e),
-    }
-  })
+      } else {
+        CiError::Database(e)
+      }
+    })
 }
 
 /// Get a project by ID.
@@ -37,10 +52,12 @@ pub async fn create(pool: &PgPool, input: CreateProject) -> Result<Project> {
 ///
 /// Returns error if database query fails or project not found.
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<Project> {
-  sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id = $1")
-    .bind(id)
-    .fetch_optional(pool)
+  let client = pool.get().await?;
+  q::get()
+    .bind(&client, &id)
+    .opt()
     .await?
+    .map(Project::from)
     .ok_or_else(|| CiError::NotFound(format!("Project {id} not found")))
 }
 
@@ -50,10 +67,12 @@ pub async fn get(pool: &PgPool, id: Uuid) -> Result<Project> {
 ///
 /// Returns error if database query fails or project not found.
 pub async fn get_by_name(pool: &PgPool, name: &str) -> Result<Project> {
-  sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE name = $1")
-    .bind(name)
-    .fetch_optional(pool)
+  let client = pool.get().await?;
+  q::get_by_name()
+    .bind(&client, &name)
+    .opt()
     .await?
+    .map(Project::from)
     .ok_or_else(|| CiError::NotFound(format!("Project '{name}' not found")))
 }
 
@@ -67,14 +86,9 @@ pub async fn list(
   limit: i64,
   offset: i64,
 ) -> Result<Vec<Project>> {
-  sqlx::query_as::<_, Project>(
-    "SELECT * FROM projects ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-  )
-  .bind(limit)
-  .bind(offset)
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)
+  let client = pool.get().await?;
+  let rows = q::list().bind(&client, &limit, &offset).all().await?;
+  Ok(rows.into_iter().map(Project::from).collect())
 }
 
 /// Count total number of projects.
@@ -83,11 +97,8 @@ pub async fn list(
 ///
 /// Returns error if database query fails.
 pub async fn count(pool: &PgPool) -> Result<i64> {
-  let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM projects")
-    .fetch_one(pool)
-    .await
-    .map_err(CiError::Database)?;
-  Ok(row.0)
+  let client = pool.get().await?;
+  Ok(q::count().bind(&client).one().await?)
 }
 
 /// Update a project with partial fields.
@@ -100,31 +111,25 @@ pub async fn update(
   id: Uuid,
   input: UpdateProject,
 ) -> Result<Project> {
-  // Dynamic update - only set provided fields
+  // Read-modify-write so omitted fields keep their existing value.
   let existing = get(pool, id).await?;
-
   let name = input.name.unwrap_or(existing.name);
   let description = input.description.or(existing.description);
   let repository_url = input.repository_url.unwrap_or(existing.repository_url);
 
-  sqlx::query_as::<_, Project>(
-    "UPDATE projects SET name = $1, description = $2, repository_url = $3 \
-     WHERE id = $4 RETURNING *",
-  )
-  .bind(&name)
-  .bind(&description)
-  .bind(&repository_url)
-  .bind(id)
-  .fetch_one(pool)
-  .await
-  .map_err(|e| {
-    match &e {
-      sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
+  let client = pool.get().await?;
+  q::update()
+    .bind(&client, &name, &description, &repository_url, &id)
+    .one()
+    .await
+    .map(Project::from)
+    .map_err(|e| {
+      if is_unique_violation(&e) {
         CiError::Conflict(format!("Project '{name}' already exists"))
-      },
-      _ => CiError::Database(e),
-    }
-  })
+      } else {
+        CiError::Database(e)
+      }
+    })
 }
 
 /// Insert or update a project by name.
@@ -133,29 +138,22 @@ pub async fn update(
 ///
 /// Returns error if database operation fails.
 pub async fn upsert(pool: &PgPool, input: CreateProject) -> Result<Project> {
-  sqlx::query_as::<_, Project>(
-    "INSERT INTO projects (name, description, repository_url) VALUES ($1, $2, \
-     $3) ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description, \
-     repository_url = EXCLUDED.repository_url RETURNING *",
+  let client = pool.get().await?;
+  Ok(
+    q::upsert()
+      .bind(
+        &client,
+        &input.name,
+        &input.description,
+        &input.repository_url,
+      )
+      .one()
+      .await
+      .map(Project::from)?,
   )
-  .bind(&input.name)
-  .bind(&input.description)
-  .bind(&input.repository_url)
-  .fetch_one(pool)
-  .await
-  .map_err(CiError::Database)
 }
 
-/// List projects that have no active jobsets.
-///
-/// Used by the evaluator to discover in-repo declarative config for projects
-/// that have not yet bootstrapped any jobsets through the server config.
-///
-/// # Returns
-///
-/// Projects that have NO jobsets at all. A project with only disabled
-/// jobsets is considered intentionally configured and is not re-discovered,
-/// honoring the user's choice to disable evaluation without re-cloning.
+/// List projects that have no jobsets at all.
 ///
 /// # Errors
 ///
@@ -163,13 +161,9 @@ pub async fn upsert(pool: &PgPool, input: CreateProject) -> Result<Project> {
 pub async fn list_without_active_jobsets(
   pool: &PgPool,
 ) -> Result<Vec<Project>> {
-  sqlx::query_as::<_, Project>(
-    "SELECT p.* FROM projects p WHERE NOT EXISTS (SELECT 1 FROM jobsets j \
-     WHERE j.project_id = p.id)",
-  )
-  .fetch_all(pool)
-  .await
-  .map_err(CiError::Database)
+  let client = pool.get().await?;
+  let rows = q::list_without_active_jobsets().bind(&client).all().await?;
+  Ok(rows.into_iter().map(Project::from).collect())
 }
 
 /// Delete a project by ID.
@@ -178,14 +172,10 @@ pub async fn list_without_active_jobsets(
 ///
 /// Returns error if database delete fails or project not found.
 pub async fn delete(pool: &PgPool, id: Uuid) -> Result<()> {
-  let result = sqlx::query("DELETE FROM projects WHERE id = $1")
-    .bind(id)
-    .execute(pool)
-    .await?;
-
-  if result.rows_affected() == 0 {
+  let client = pool.get().await?;
+  let affected = q::delete().bind(&client, &id).await?;
+  if affected == 0 {
     return Err(CiError::NotFound(format!("Project {id} not found")));
   }
-
   Ok(())
 }

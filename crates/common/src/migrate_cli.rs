@@ -64,8 +64,8 @@ pub async fn run() -> color_eyre::Result<()> {
     },
     Commands::Validate { database_url } => {
       info!("Validating database schema");
-      let pool = sqlx::PgPool::connect(&database_url).await?;
-      crate::validate_schema(&pool).await?;
+      let client = circus_migrations::tls::connect_once(&database_url).await?;
+      crate::validate_schema(&client).await?;
       info!("Schema validation passed");
     },
     Commands::Create { name, output_dir } => {

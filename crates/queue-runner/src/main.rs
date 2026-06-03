@@ -58,6 +58,7 @@ async fn main() -> color_eyre::Result<()> {
   // Clean up orphaned active logs from previous crashes
   cleanup_stale_logs(&log_config.log_dir).await;
 
+  let database_url = config.database.url.clone();
   let db = Database::new(config.database).await?;
 
   // Crash recovery for builder_sessions.connected: rows from any
@@ -123,7 +124,7 @@ async fn main() -> color_eyre::Result<()> {
 
   let wakeup = Arc::new(tokio::sync::Notify::new());
   let listener_handle = circus_common::pg_notify::spawn_listener(
-    db.pool(),
+    &database_url,
     &[circus_common::pg_notify::CHANNEL_BUILDS_CHANGED],
     Arc::clone(&wakeup),
   );
@@ -189,7 +190,7 @@ fn spawn_rpc_thread(
   cache_cfg: circus_common::config::CacheUploadConfig,
   signing_cfg: circus_common::config::SigningConfig,
   pool: Arc<AgentPool>,
-  db_pool: sqlx::PgPool,
+  db_pool: circus_common::PgPool,
 ) {
   std::thread::Builder::new()
     .name("circus-rpc".into())
@@ -246,7 +247,7 @@ async fn cleanup_stale_logs(log_dir: &std::path::Path) {
   }
 }
 
-async fn gc_loop(gc_config: GcConfig, pool: sqlx::PgPool) {
+async fn gc_loop(gc_config: GcConfig, pool: circus_common::PgPool) {
   if !gc_config.enabled {
     return std::future::pending().await;
   }
@@ -323,7 +324,7 @@ async fn gc_loop(gc_config: GcConfig, pool: sqlx::PgPool) {
 }
 
 async fn failed_paths_cleanup_loop(
-  pool: sqlx::PgPool,
+  pool: circus_common::PgPool,
   hot_config: Arc<RwLock<HotConfig>>,
   enabled: bool,
 ) {
@@ -353,7 +354,10 @@ async fn failed_paths_cleanup_loop(
   }
 }
 
-async fn cancel_checker_loop(pool: sqlx::PgPool, active_builds: ActiveBuilds) {
+async fn cancel_checker_loop(
+  pool: circus_common::PgPool,
+  active_builds: ActiveBuilds,
+) {
   let interval = Duration::from_secs(2);
   #[expect(
     clippy::infinite_loop,
@@ -387,7 +391,10 @@ async fn cancel_checker_loop(pool: sqlx::PgPool, active_builds: ActiveBuilds) {
 
 /// Write a service heartbeat on every poll tick so the server's /health
 /// endpoint can report queue-runner liveness.
-async fn heartbeat_loop(pool: sqlx::PgPool, poll_interval_seconds: u64) {
+async fn heartbeat_loop(
+  pool: circus_common::PgPool,
+  poll_interval_seconds: u64,
+) {
   let interval = std::time::Duration::from_secs(poll_interval_seconds.max(1));
   // Emit one immediately so /health doesn't return "never reported" during
   // the first poll interval after startup.
@@ -459,7 +466,7 @@ async fn sighup_loop(hot_config: Arc<RwLock<HotConfig>>) {
 }
 
 async fn notification_retry_loop(
-  pool: sqlx::PgPool,
+  pool: circus_common::PgPool,
   hot_config: Arc<RwLock<HotConfig>>,
 ) {
   let (enable_retry_queue, poll_interval, retention_days) = {

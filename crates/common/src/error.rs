@@ -5,7 +5,10 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum CiError {
   #[error("Database error: {0}")]
-  Database(#[from] sqlx::Error),
+  Database(#[from] tokio_postgres::Error),
+
+  #[error("Connection pool error: {0}")]
+  Pool(#[from] deadpool_postgres::PoolError),
 
   #[error("Git error: {0}")]
   Git(#[from] git2::Error),

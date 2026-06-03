@@ -2,7 +2,6 @@
 #![expect(clippy::print_stdout, reason = "Fine in tests")]
 
 use circus_common::{config::DatabaseConfig, *};
-use sqlx::PgPool;
 
 #[tokio::test]
 async fn test_database_connection() -> color_eyre::Result<()> {
@@ -48,45 +47,35 @@ async fn test_database_connection() -> color_eyre::Result<()> {
 
 #[tokio::test]
 async fn test_database_health_check() -> color_eyre::Result<()> {
+  let url = "postgresql://postgres:password@localhost/test";
+  let pool = circus_common::db::build_pool(url, 5)?;
+
   // Try to connect, skip test if database is not available
-  let pool = match PgPool::connect(
-    "postgresql://postgres:password@localhost/test",
-  )
-  .await
-  {
-    Ok(pool) => pool,
-    Err(e) => {
-      println!(
-        "Skipping test_database_health_check: no PostgreSQL instance \
-         available - {e}"
-      );
-      return Ok(());
-    },
-  };
+  if let Err(e) = Database::health_check(&pool).await {
+    println!(
+      "Skipping test_database_health_check: no PostgreSQL instance available \
+       - {e}"
+    );
+    pool.close();
+    return Ok(());
+  }
 
-  // Should succeed
-  Database::health_check(&pool).await?;
-
-  pool.close().await;
+  pool.close();
   Ok(())
 }
 
 #[tokio::test]
 async fn test_connection_info() -> color_eyre::Result<()> {
   // Try to connect, skip test if database is not available
-  let pool = match PgPool::connect(
-    "postgresql://postgres:password@localhost/test",
-  )
-  .await
-  {
-    Ok(pool) => pool,
-    Err(e) => {
-      println!(
-        "Skipping test_connection_info: no PostgreSQL instance available - {e}"
-      );
-      return Ok(());
-    },
-  };
+  let url = "postgresql://postgres:password@localhost/test";
+  let pool = circus_common::db::build_pool(url, 5)?;
+  if let Err(e) = Database::health_check(&pool).await {
+    println!(
+      "Skipping test_connection_info: no PostgreSQL instance available - {e}"
+    );
+    pool.close();
+    return Ok(());
+  }
 
   let db = match Database::new(DatabaseConfig {
     url:             "postgresql://postgres:password@localhost/test"
@@ -104,7 +93,7 @@ async fn test_connection_info() -> color_eyre::Result<()> {
       println!(
         "Skipping test_connection_info: database connection failed - {e}"
       );
-      pool.close().await;
+      pool.close();
       return Ok(());
     },
   };
@@ -117,7 +106,7 @@ async fn test_connection_info() -> color_eyre::Result<()> {
   assert!(info.version.contains("PostgreSQL"));
 
   db.close().await;
-  pool.close().await;
+  pool.close();
 
   Ok(())
 }
@@ -155,7 +144,7 @@ async fn test_pool_stats() -> color_eyre::Result<()> {
   Ok(())
 }
 
-#[sqlx::test]
+#[tokio::test]
 async fn test_database_config_validation() -> color_eyre::Result<()> {
   // Valid config
   let config = DatabaseConfig {

@@ -1,0 +1,36 @@
+# Clorinde (the merged-back cornucopia) generates a standalone Rust crate at
+# `db/circus-codegen` from the `.sql` files in `queries/`, type-checked against
+# the live schema in `migrations/`. Regenerate with `scripts/codegen.sh`; the
+# crate is committed and consumed via `circus-codegen = { path =
+# "db/circus-codegen" }`. The `codegen-up-to-date` flake check fails CI if the
+# committed tree drifts from queries/ × migrations/.
+
+destination = "db/circus-codegen"
+
+# clorinde defaults TIMESTAMPTZ to chrono::DateTime<FixedOffset>; force Utc so
+# generated rows line up with models.rs (which is all DateTime<Utc>) and the
+# repo layer needs no per-field timezone conversion. tokio-postgres'
+# with-chrono-0_4 provides FromSql/ToSql for DateTime<Utc>.
+[types.mapping."pg_catalog.timestamptz"]
+rust-type = "chrono::DateTime<chrono::Utc>"
+
+[manifest.package]
+name    = "circus-codegen"
+publish = false
+
+# chrono (not time) for TIMESTAMPTZ, matching the existing `models.rs` which
+# uses chrono::DateTime<Utc>. Enabling `with-chrono-0_4` on the postgres
+# clients makes clorinde map TIMESTAMPTZ -> chrono::DateTime<Utc>, UUID ->
+# uuid::Uuid, JSONB -> serde_json::Value, TEXT[]-> Vec<String>.
+[manifest.dependencies]
+chrono = { version = "0.4", features = [ "serde" ] }
+# raw_value: clorinde emits borrowed JSONB columns as Json<&RawValue>, which
+# requires serde_json's raw_value feature.
+postgres = { version = "0.19", features = [
+  "with-chrono-0_4",
+  "with-serde_json-1",
+  "with-uuid-1",
+], optional = true }
+serde_json = { version = "1", features = [ "raw_value" ] }
+tokio-postgres = { version = "0.7", features = [ "with-chrono-0_4", "with-serde_json-1", "with-uuid-1" ] }
+uuid = { version = "1", features = [ "serde" ] }

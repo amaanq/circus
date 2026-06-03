@@ -1,6 +1,7 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use circus_common::{
+  PgPool,
   alerts::AlertManager,
   config::{
     AlertConfig,
@@ -25,7 +26,6 @@ use circus_common::{
   repo,
 };
 use dashmap::DashMap;
-use sqlx::PgPool;
 use tokio::sync::{RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -839,10 +839,7 @@ async fn run_build(
   tracing::info!(build_id = %build.id, job = %build.job_name, "Starting build");
 
   // Clear stale steps from a prior requeued attempt.
-  sqlx::query("DELETE FROM build_steps WHERE build_id = $1")
-    .bind(build.id)
-    .execute(pool)
-    .await?;
+  repo::build_steps::delete_for_build(pool, build.id).await?;
 
   // Create a build step record
   let step = repo::build_steps::create(pool, CreateBuildStep {
@@ -1101,12 +1098,11 @@ async fn run_build(
 
           // Update the build product with GC root path if registered
           if gc_root_path.is_some() {
-            sqlx::query(
-              "UPDATE build_products SET gc_root_path = $1 WHERE id = $2",
+            repo::build_products::set_gc_root_path(
+              pool,
+              product.id,
+              gc_root_path.as_deref(),
             )
-            .bind(&gc_root_path)
-            .bind(product.id)
-            .execute(pool)
             .await?;
           }
         }
@@ -1196,13 +1192,7 @@ async fn run_build(
               max = build.max_retries,
               "Build failed, scheduling retry"
           );
-          sqlx::query(
-            "UPDATE builds SET status = 'pending', started_at = NULL, \
-             retry_count = retry_count + 1, completed_at = NULL WHERE id = $1",
-          )
-          .bind(build.id)
-          .execute(pool)
-          .await?;
+          repo::builds::retry(pool, build.id).await?;
           if let Err(e) = tokio::fs::remove_file(&live_log_path).await {
             tracing::debug!(build_id = %build.id, "Failed to remove retry live log: {e}");
           }

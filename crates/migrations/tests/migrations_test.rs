@@ -15,9 +15,9 @@ use circus_migrations::{
   REQUIRED_VIEWS,
   migration_set,
   run_migrations,
+  tls::connect_once,
   validate_schema,
 };
-use sqlx::{PgPool, Postgres, migrate::MigrateDatabase};
 
 fn test_database_url() -> String {
   std::env::var("CIRCUS_TEST_DATABASE_URL").unwrap_or_else(|_| {
@@ -26,20 +26,50 @@ fn test_database_url() -> String {
   })
 }
 
+/// Split a database URL into the maintenance (`/postgres`) URL and the target
+/// database name, so we can run admin statements (`DROP`/`CREATE`/existence
+/// checks) without first connecting to the database under test.
+fn maintenance_url_and_dbname(url: &str) -> (String, String) {
+  let mut parsed = url::Url::parse(url).expect("parse database URL");
+  let dbname = parsed.path().trim_start_matches('/').to_owned();
+  parsed.set_path("/postgres");
+  (parsed.to_string(), dbname)
+}
+
+/// Whether the target database exists, queried against the maintenance DB.
+async fn database_exists(url: &str) -> Result<bool, tokio_postgres::Error> {
+  let (admin_url, dbname) = maintenance_url_and_dbname(url);
+  let client = connect_once(&admin_url).await?;
+  let exists = client
+    .query_opt("SELECT 1 FROM pg_database WHERE datname = $1", &[&dbname])
+    .await?
+    .is_some();
+  Ok(exists)
+}
+
 /// Drop the test database if it exists so each test run starts from a clean
 /// state. Failure to drop is non-fatal -- if the connection cannot be made
 /// the caller will detect that next and skip.
 async fn reset_database(url: &str) {
-  if matches!(Postgres::database_exists(url).await, Ok(true)) {
-    let _ = Postgres::drop_database(url).await;
-  }
+  let (admin_url, dbname) = maintenance_url_and_dbname(url);
+  let Ok(client) = connect_once(&admin_url).await else {
+    return;
+  };
+  // Identifiers cannot be parameterized; quote to neutralize the name. FORCE
+  // terminates any lingering connections so the drop cannot wedge.
+  let quoted = dbname.replace('"', "\"\"");
+  let _ = client
+    .batch_execute(&format!(
+      "DROP DATABASE IF EXISTS \"{quoted}\" WITH (FORCE)"
+    ))
+    .await;
 }
 
 /// Try to verify the server is reachable. Returns `None` (skip) if not.
 async fn require_postgres(url: &str) -> Option<()> {
-  // We can't `PgPool::connect` to a non-existent DB, so just check whether
-  // the server answers at all by attempting an "exists" lookup.
-  match Postgres::database_exists(url).await {
+  // We can't connect to a non-existent DB, so check whether the server answers
+  // at all by querying the maintenance database for the target's existence.
+  match database_exists(url).await {
     Ok(_) => Some(()),
     Err(e) => {
       eprintln!("Skipping: no PostgreSQL reachable at {url}: {e}");
@@ -59,35 +89,35 @@ async fn migrations_create_required_tables_and_views() {
 
   run_migrations(&url).await.expect("run_migrations");
 
-  let pool = PgPool::connect(&url).await.expect("connect after migrate");
+  let client = connect_once(&url).await.expect("connect after migrate");
 
-  validate_schema(&pool).await.expect("validate_schema");
+  validate_schema(&client).await.expect("validate_schema");
 
   // Belt and braces: explicitly check every table/view we claim to require.
   for table in REQUIRED_TABLES {
-    let n: i64 = sqlx::query_scalar(
-      "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = $1 \
-       AND table_schema = 'public'",
-    )
-    .bind(table)
-    .fetch_one(&pool)
-    .await
-    .expect("count tables");
+    let row = client
+      .query_one(
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = $1 \
+         AND table_schema = 'public'",
+        &[table],
+      )
+      .await
+      .expect("count tables");
+    let n: i64 = row.get(0);
     assert_eq!(n, 1, "missing required table {table}");
   }
   for view in REQUIRED_VIEWS {
-    let n: i64 = sqlx::query_scalar(
-      "SELECT COUNT(*) FROM information_schema.views WHERE table_name = $1 \
-       AND table_schema = 'public'",
-    )
-    .bind(view)
-    .fetch_one(&pool)
-    .await
-    .expect("count views");
+    let row = client
+      .query_one(
+        "SELECT COUNT(*) FROM information_schema.views WHERE table_name = $1 \
+         AND table_schema = 'public'",
+        &[view],
+      )
+      .await
+      .expect("count views");
+    let n: i64 = row.get(0);
     assert_eq!(n, 1, "missing required view {view}");
   }
-
-  pool.close().await;
 }
 
 #[tokio::test]
@@ -103,23 +133,23 @@ async fn migrations_are_idempotent_when_run_twice() {
   // The hot path: a no-op replay must succeed against the same schema.
   run_migrations(&url).await.expect("second run");
 
-  let pool = PgPool::connect(&url).await.expect("connect");
-  validate_schema(&pool).await.expect("validate after replay");
+  let client = connect_once(&url).await.expect("connect");
+  validate_schema(&client)
+    .await
+    .expect("validate after replay");
 
-  // sqlx records applied migrations in _sqlx_migrations; row count must equal
+  // Applied migrations are recorded in _sqlx_migrations; row count must equal
   // the static migration set length.
-  let applied: i64 =
-    sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
-      .fetch_one(&pool)
-      .await
-      .expect("count applied");
+  let applied: i64 = client
+    .query_one("SELECT COUNT(*) FROM _sqlx_migrations", &[])
+    .await
+    .expect("count applied")
+    .get(0);
   assert_eq!(
     applied as usize,
     migration_set().len(),
     "applied count does not match static migration set"
   );
-
-  pool.close().await;
 }
 
 #[tokio::test]
@@ -131,14 +161,14 @@ async fn run_migrations_creates_database_if_missing() {
 
   reset_database(&url).await;
   assert!(
-    !Postgres::database_exists(&url).await.expect("exists check"),
+    !database_exists(&url).await.expect("exists check"),
     "precondition: db should not exist"
   );
 
   run_migrations(&url).await.expect("run on missing db");
 
   assert!(
-    Postgres::database_exists(&url).await.expect("exists check"),
+    database_exists(&url).await.expect("exists check"),
     "run_migrations did not create the database"
   );
 }

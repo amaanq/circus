@@ -1,0 +1,5 @@
+# The clorinde query crate is generated from queries/ x migrations/ by
+# scripts/codegen.sh. Mark it generated so forges collapse it in diffs and
+# exclude it from language stats, and suppress local diff hunks for it.
+db/circus-codegen/** linguist-generated=true
+db/circus-codegen/** -diff

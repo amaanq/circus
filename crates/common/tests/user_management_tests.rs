@@ -11,22 +11,16 @@
 use circus_common::{models::*, repo};
 use uuid::Uuid;
 
-async fn get_pool() -> Option<sqlx::PgPool> {
+async fn get_pool() -> Option<circus_common::PgPool> {
   let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
     println!("Skipping repo test: TEST_DATABASE_URL not set");
     return None;
   };
 
-  let pool = sqlx::postgres::PgPoolOptions::new()
-    .max_connections(5)
-    .connect(&url)
-    .await
-    .ok()?;
-
   // Run migrations
-  sqlx::migrate!("./migrations").run(&pool).await.ok()?;
+  circus_migrations::run_migrations(&url).await.ok()?;
 
-  Some(pool)
+  circus_common::db::build_pool(&url, 5).ok()
 }
 
 #[tokio::test]
@@ -35,7 +29,8 @@ async fn test_user_crud() {
     return;
   };
 
-  let username = format!("test-user-{}", Uuid::new_v4().simple());
+  let username =
+    format!("test-user-{}", &Uuid::new_v4().simple().to_string()[..8]);
   let email = format!("{username}@example.com");
 
   // Create user
@@ -145,7 +140,8 @@ async fn test_user_authentication() {
     return;
   };
 
-  let username = format!("auth-test-{}", Uuid::new_v4().simple());
+  let username =
+    format!("auth-test-{}", &Uuid::new_v4().simple().to_string()[..8]);
   let password = "my_secret_password";
 
   // Create user
@@ -247,7 +243,8 @@ async fn test_user_unique_constraints() {
     return;
   };
 
-  let username = format!("unique-{}", Uuid::new_v4().simple());
+  let username =
+    format!("unique-{}", &Uuid::new_v4().simple().to_string()[..8]);
   let email = format!("{username}@example.com");
 
   // Create first user
@@ -309,7 +306,8 @@ async fn test_oauth_user_creation() {
     return;
   };
 
-  let username = format!("oauth-user-{}", Uuid::new_v4().simple());
+  let username =
+    format!("oauth-user-{}", &Uuid::new_v4().simple().to_string()[..8]);
   let email = format!("{username}@github.com");
   let oauth_provider_id = format!("github_{}", Uuid::new_v4().simple());
 
@@ -359,7 +357,10 @@ async fn test_starred_jobs_crud() {
   let user = repo::users::create(
     &pool,
     &CreateUser {
-      username:  format!("star-user-{}", Uuid::new_v4().simple()),
+      username:  format!(
+        "star-user-{}",
+        &Uuid::new_v4().simple().to_string()[..8]
+      ),
       email:     format!("star-{}@example.com", Uuid::new_v4().simple()),
       full_name: None,
       password:  "password".to_string(),
@@ -478,7 +479,10 @@ async fn test_starred_jobs_delete_by_job() {
   let user = repo::users::create(
     &pool,
     &CreateUser {
-      username:  format!("del-user-{}", Uuid::new_v4().simple()),
+      username:  format!(
+        "del-user-{}",
+        &Uuid::new_v4().simple().to_string()[..8]
+      ),
       email:     format!("del-{}@example.com", Uuid::new_v4().simple()),
       full_name: None,
       password:  "password".to_string(),
@@ -556,7 +560,10 @@ async fn test_project_members_crud() {
   let user = repo::users::create(
     &pool,
     &CreateUser {
-      username:  format!("member-user-{}", Uuid::new_v4().simple()),
+      username:  format!(
+        "member-user-{}",
+        &Uuid::new_v4().simple().to_string()[..8]
+      ),
       email:     format!("member-{}@example.com", Uuid::new_v4().simple()),
       full_name: None,
       password:  "password".to_string(),
@@ -661,7 +668,10 @@ async fn test_project_members_permissions() {
   let admin_user = repo::users::create(
     &pool,
     &CreateUser {
-      username:  format!("admin-user-{}", Uuid::new_v4().simple()),
+      username:  format!(
+        "admin-user-{}",
+        &Uuid::new_v4().simple().to_string()[..8]
+      ),
       email:     format!("admin-{}@example.com", Uuid::new_v4().simple()),
       full_name: None,
       password:  "password".to_string(),
@@ -675,7 +685,10 @@ async fn test_project_members_permissions() {
   let maintainer_user = repo::users::create(
     &pool,
     &CreateUser {
-      username:  format!("maint-user-{}", Uuid::new_v4().simple()),
+      username:  format!(
+        "maint-user-{}",
+        &Uuid::new_v4().simple().to_string()[..8]
+      ),
       email:     format!("maint-{}@example.com", Uuid::new_v4().simple()),
       full_name: None,
       password:  "password".to_string(),
@@ -689,7 +702,10 @@ async fn test_project_members_permissions() {
   let member_user = repo::users::create(
     &pool,
     &CreateUser {
-      username:  format!("member-user-{}", Uuid::new_v4().simple()),
+      username:  format!(
+        "member-user-{}",
+        &Uuid::new_v4().simple().to_string()[..8]
+      ),
       email:     format!("mem-{}@example.com", Uuid::new_v4().simple()),
       full_name: None,
       password:  "password".to_string(),
@@ -830,7 +846,10 @@ async fn test_project_members_permissions() {
   let non_member = repo::users::create(
     &pool,
     &CreateUser {
-      username:  format!("non-member-{}", Uuid::new_v4().simple()),
+      username:  format!(
+        "non-member-{}",
+        &Uuid::new_v4().simple().to_string()[..8]
+      ),
       email:     format!("non-{}@example.com", Uuid::new_v4().simple()),
       full_name: None,
       password:  "password".to_string(),

@@ -9,26 +9,25 @@
 
 use circus_common::{models::*, repo};
 
-async fn get_pool() -> Option<sqlx::PgPool> {
+async fn get_pool() -> Option<circus_common::PgPool> {
   let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
     println!("Skipping repo test: TEST_DATABASE_URL not set");
     return None;
   };
 
-  let pool = sqlx::postgres::PgPoolOptions::new()
-    .max_connections(5)
-    .connect(&url)
-    .await
-    .ok()?;
-
   // Run migrations
-  sqlx::migrate!("./migrations").run(&pool).await.ok()?;
+  circus_migrations::run_migrations(&url).await.ok()?;
+
+  let pool = circus_common::db::build_pool(&url, 5).ok()?;
 
   Some(pool)
 }
 
 /// Helper: create a project with a unique name.
-async fn create_test_project(pool: &sqlx::PgPool, prefix: &str) -> Project {
+async fn create_test_project(
+  pool: &circus_common::PgPool,
+  prefix: &str,
+) -> Project {
   repo::projects::create(pool, CreateProject {
     name:           format!("{prefix}-{}", uuid::Uuid::new_v4()),
     description:    Some("Test project".to_string()),
@@ -40,7 +39,7 @@ async fn create_test_project(pool: &sqlx::PgPool, prefix: &str) -> Project {
 
 /// Helper: create a jobset for a project.
 async fn create_test_jobset(
-  pool: &sqlx::PgPool,
+  pool: &circus_common::PgPool,
   project_id: uuid::Uuid,
 ) -> Jobset {
   repo::jobsets::create(pool, CreateJobset {
@@ -62,7 +61,7 @@ async fn create_test_jobset(
 
 /// Helper: create an evaluation for a jobset.
 async fn create_test_eval(
-  pool: &sqlx::PgPool,
+  pool: &circus_common::PgPool,
   jobset_id: uuid::Uuid,
 ) -> Evaluation {
   repo::evaluations::create(pool, CreateEvaluation {
@@ -79,7 +78,7 @@ async fn create_test_eval(
 
 /// Helper: create a build for an evaluation.
 async fn create_test_build(
-  pool: &sqlx::PgPool,
+  pool: &circus_common::PgPool,
   eval_id: uuid::Uuid,
   job_name: &str,
   drv_path: &str,
@@ -841,13 +840,14 @@ async fn test_reset_orphaned_batch_limit() {
   repo::builds::start(&pool, build.id).await.unwrap();
 
   // Set started_at to 2 hours ago to make it look orphaned
-  sqlx::query(
-    "UPDATE builds SET started_at = NOW() - INTERVAL '2 hours' WHERE id = $1",
-  )
-  .bind(build.id)
-  .execute(&pool)
-  .await
-  .unwrap();
+  let client = pool.get().await.unwrap();
+  client
+    .execute(
+      "UPDATE builds SET started_at = NOW() - INTERVAL '2 hours' WHERE id = $1",
+      &[&build.id],
+    )
+    .await
+    .unwrap();
 
   // Reset orphaned with 1 hour threshold
   let reset_count = repo::builds::reset_orphaned(&pool, 3600)
