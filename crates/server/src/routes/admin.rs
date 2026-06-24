@@ -668,6 +668,10 @@ struct NarsQuery {
   #[serde(default)]
   package: Option<String>,
   #[serde(default)]
+  sort:    Option<String>,
+  #[serde(default)]
+  dir:     Option<String>,
+  #[serde(default)]
   offset:  Option<i64>,
   #[serde(default)]
   limit:   Option<i64>,
@@ -706,12 +710,22 @@ async fn list_cache_nars(
   let package = normalize(query.package);
   let limit = query.limit.unwrap_or(50).clamp(1, 500);
   let offset = query.offset.unwrap_or(0).max(0);
+  let sort = circus_common::repo::narinfo_cache::NarListSort::from_param(
+    query.sort.as_deref(),
+  );
+  let dir =
+    circus_common::repo::narinfo_cache::NarListSortDirection::from_param(
+      query.dir.as_deref(),
+      sort,
+    );
 
   let items = circus_common::repo::narinfo_cache::list_filtered(
     &state.pool,
     cache.scope,
     hash.as_deref(),
     package.as_deref(),
+    sort,
+    dir,
     limit,
     offset,
   )

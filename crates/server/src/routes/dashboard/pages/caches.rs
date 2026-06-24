@@ -21,6 +21,7 @@ use super::{
       CacheRowView,
       CachesTemplate,
       NarRowView,
+      SortHeaderView,
     },
   },
   ui_config,
@@ -36,6 +37,121 @@ fn fmt_opt_ts(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
     || "-".to_owned(),
     |t| t.format("%Y-%m-%d %H:%M").to_string(),
   )
+}
+
+const NAR_SORT_COLUMNS: [(
+  circus_common::repo::narinfo_cache::NarListSort,
+  &str,
+); 7] = [
+  (
+    circus_common::repo::narinfo_cache::NarListSort::Hash,
+    "Hash",
+  ),
+  (
+    circus_common::repo::narinfo_cache::NarListSort::Package,
+    "Package",
+  ),
+  (
+    circus_common::repo::narinfo_cache::NarListSort::NarSize,
+    "NAR size",
+  ),
+  (
+    circus_common::repo::narinfo_cache::NarListSort::FileSize,
+    "File size",
+  ),
+  (
+    circus_common::repo::narinfo_cache::NarListSort::Compression,
+    "Compression",
+  ),
+  (
+    circus_common::repo::narinfo_cache::NarListSort::CreatedAt,
+    "Created",
+  ),
+  (
+    circus_common::repo::narinfo_cache::NarListSort::LastFetchedAt,
+    "Last fetched",
+  ),
+];
+
+fn cache_nars_href(
+  detail_href: &str,
+  filter_hash: &str,
+  filter_package: &str,
+  sort: circus_common::repo::narinfo_cache::NarListSort,
+  dir: circus_common::repo::narinfo_cache::NarListSortDirection,
+  offset: i64,
+  limit: i64,
+) -> String {
+  let mut params = vec![
+    format!("sort={}", sort.as_param()),
+    format!("dir={}", dir.as_param()),
+    format!("offset={offset}"),
+    format!("limit={limit}"),
+  ];
+  if !filter_hash.is_empty() {
+    params.push(format!("hash={}", urlencoding::encode(filter_hash)));
+  }
+  if !filter_package.is_empty() {
+    params.push(format!(
+      "package={}",
+      urlencoding::encode(filter_package)
+    ));
+  }
+  format!("{detail_href}/nars?{}", params.join("&"))
+}
+
+fn nar_sort_headers(
+  detail_href: &str,
+  filter_hash: &str,
+  filter_package: &str,
+  active_sort: circus_common::repo::narinfo_cache::NarListSort,
+  active_dir: circus_common::repo::narinfo_cache::NarListSortDirection,
+  limit: i64,
+) -> Vec<SortHeaderView> {
+  NAR_SORT_COLUMNS
+    .iter()
+    .map(|(sort, label)| {
+      let active = active_sort == *sort;
+      let next_dir = if active {
+        active_dir.toggle()
+      } else {
+        sort.default_direction()
+      };
+      SortHeaderView {
+        key: sort.as_param().to_string(),
+        label: (*label).to_string(),
+        href: cache_nars_href(
+          detail_href,
+          filter_hash,
+          filter_package,
+          *sort,
+          next_dir,
+          0,
+          limit,
+        ),
+        default_dir: sort.default_direction().as_param().to_string(),
+        active,
+        indicator: if active {
+          active_dir.as_param().to_string()
+        } else {
+          String::new()
+        },
+        aria_sort: if active {
+          match active_dir {
+            circus_common::repo::narinfo_cache::NarListSortDirection::Asc => {
+              "ascending"
+            },
+            circus_common::repo::narinfo_cache::NarListSortDirection::Desc => {
+              "descending"
+            },
+          }
+        } else {
+          "none"
+        }
+        .to_string(),
+      }
+    })
+    .collect()
 }
 
 pub(in crate::routes::dashboard) async fn caches_page(
@@ -174,14 +290,25 @@ pub(in crate::routes::dashboard) async fn cache_nars_page(
 
   let limit = params.limit.unwrap_or(50).clamp(1, 200);
   let offset = params.offset.unwrap_or(0).max(0);
-  let hash = params.hash.clone();
-  let package = params.package.clone();
+  let filter_hash = params.hash.clone().unwrap_or_default();
+  let filter_package = params.package.clone().unwrap_or_default();
+  let sort = circus_common::repo::narinfo_cache::NarListSort::from_param(
+    params.sort.as_deref(),
+  );
+  let dir =
+    circus_common::repo::narinfo_cache::NarListSortDirection::from_param(
+      params.dir.as_deref(),
+      sort,
+    );
+  let detail_href = format!("/caches/{}", cache.name);
 
   let items = circus_common::repo::narinfo_cache::list_filtered(
     &state.pool,
     cache.scope,
-    hash.as_deref(),
-    package.as_deref(),
+    params.hash.as_deref(),
+    params.package.as_deref(),
+    sort,
+    dir,
     limit,
     offset,
   )
@@ -190,8 +317,8 @@ pub(in crate::routes::dashboard) async fn cache_nars_page(
   let total = circus_common::repo::narinfo_cache::count_filtered(
     &state.pool,
     cache.scope,
-    hash.as_deref(),
-    package.as_deref(),
+    params.hash.as_deref(),
+    params.package.as_deref(),
   )
   .await
   .map_err(cache_db_err)?;
@@ -217,6 +344,7 @@ pub(in crate::routes::dashboard) async fn cache_nars_page(
         package:      it.package_name,
         nar_size:     format_bytes(it.nar_size),
         compressed:   it.file_size.map_or_else(|| "-".to_owned(), format_bytes),
+        compression:  it.compression,
         created_at:   it.created_at.format("%Y-%m-%d %H:%M").to_string(),
         last_fetched: it.last_fetched_at.map_or_else(
           || "Never".to_owned(),
@@ -228,28 +356,59 @@ pub(in crate::routes::dashboard) async fn cache_nars_page(
     .collect();
 
   let pagination = Pagination::new(total, offset, limit);
+  let sort_headers = nar_sort_headers(
+    &detail_href,
+    &filter_hash,
+    &filter_package,
+    sort,
+    dir,
+    limit,
+  );
+  let prev_href = cache_nars_href(
+    &detail_href,
+    &filter_hash,
+    &filter_package,
+    sort,
+    dir,
+    pagination.prev_offset,
+    limit,
+  );
+  let next_href = cache_nars_href(
+    &detail_href,
+    &filter_hash,
+    &filter_package,
+    sort,
+    dir,
+    pagination.next_offset,
+    limit,
+  );
   CacheNarsTemplate {
     ui: ui_config(&state),
     is_admin: ctx.is_admin,
     auth_name: ctx.auth_name,
-    detail_href: format!("/caches/{}", cache.name),
+    detail_href,
     scope_label: cache.scope_label().to_owned(),
     name: cache.name,
-    filter_hash: params.hash.unwrap_or_default(),
-    filter_package: params.package.unwrap_or_default(),
+    filter_hash,
+    filter_package,
     total_nars: summary.nar_count,
     nar_size: format_bytes(summary.uncompressed_bytes),
     file_size: format_bytes(summary.compressed_bytes),
     last_uploaded: fmt_opt_ts(last_uploaded),
     oldest_fetched: fmt_opt_ts(oldest_fetched),
     nars,
+    sort_headers,
     page: pagination.page,
     total_pages: pagination.total_pages,
     has_prev: pagination.has_prev,
     has_next: pagination.has_next,
+    prev_href,
+    next_href,
     prev_offset: pagination.prev_offset,
     next_offset: pagination.next_offset,
     limit,
+    sort_key: sort.as_param().to_string(),
+    sort_dir: dir.as_param().to_string(),
   }
   .render_html_or_500()
 }

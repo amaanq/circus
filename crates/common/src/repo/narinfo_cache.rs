@@ -288,6 +288,94 @@ impl From<NarInfo> for NarListItem {
   }
 }
 
+/// Sortable columns for a cache's NAR inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NarListSort {
+  Hash,
+  Package,
+  NarSize,
+  FileSize,
+  Compression,
+  CreatedAt,
+  LastFetchedAt,
+}
+
+impl NarListSort {
+  #[must_use]
+  pub fn from_param(param: Option<&str>) -> Self {
+    match param {
+      Some("hash") => Self::Hash,
+      Some("package") => Self::Package,
+      Some("nar_size") => Self::NarSize,
+      Some("file_size") | Some("compressed") => Self::FileSize,
+      Some("compression") => Self::Compression,
+      Some("created_at") | Some("created") => Self::CreatedAt,
+      Some("last_fetched_at") | Some("last_fetched") => Self::LastFetchedAt,
+      _ => Self::CreatedAt,
+    }
+  }
+
+  #[must_use]
+  pub const fn as_param(self) -> &'static str {
+    match self {
+      Self::Hash => "hash",
+      Self::Package => "package",
+      Self::NarSize => "nar_size",
+      Self::FileSize => "file_size",
+      Self::Compression => "compression",
+      Self::CreatedAt => "created_at",
+      Self::LastFetchedAt => "last_fetched_at",
+    }
+  }
+
+  #[must_use]
+  pub const fn default_direction(self) -> NarListSortDirection {
+    match self {
+      Self::Hash | Self::Package | Self::Compression => {
+        NarListSortDirection::Asc
+      },
+      Self::NarSize
+      | Self::FileSize
+      | Self::CreatedAt
+      | Self::LastFetchedAt => NarListSortDirection::Desc,
+    }
+  }
+}
+
+/// Sort direction for a cache's NAR inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NarListSortDirection {
+  Asc,
+  Desc,
+}
+
+impl NarListSortDirection {
+  #[must_use]
+  pub fn from_param(param: Option<&str>, sort: NarListSort) -> Self {
+    match param {
+      Some("asc") => Self::Asc,
+      Some("desc") => Self::Desc,
+      _ => sort.default_direction(),
+    }
+  }
+
+  #[must_use]
+  pub const fn as_param(self) -> &'static str {
+    match self {
+      Self::Asc => "asc",
+      Self::Desc => "desc",
+    }
+  }
+
+  #[must_use]
+  pub const fn toggle(self) -> Self {
+    match self {
+      Self::Asc => Self::Desc,
+      Self::Desc => Self::Asc,
+    }
+  }
+}
+
 /// Derive the human-facing package name from a `/nix/store/<hash>-<name>`
 /// path: drop the prefix and the 32-char hash, returning `<name>`. Falls back
 /// to the raw path when it does not match the expected shape.
@@ -299,8 +387,58 @@ pub fn package_name_from_store_path(store_path: &str) -> String {
     .map_or_else(|| store_path.to_owned(), |(_hash, name)| name.to_owned())
 }
 
+fn nar_list_order_clause(
+  sort: NarListSort,
+  direction: NarListSortDirection,
+) -> &'static str {
+  match (sort, direction) {
+    (NarListSort::Hash, NarListSortDirection::Asc) => {
+      "store_path ASC, created_at DESC"
+    },
+    (NarListSort::Hash, NarListSortDirection::Desc) => {
+      "store_path DESC, created_at DESC"
+    },
+    (NarListSort::Package, NarListSortDirection::Asc) => {
+      "package_name ASC, store_path ASC"
+    },
+    (NarListSort::Package, NarListSortDirection::Desc) => {
+      "package_name DESC, store_path ASC"
+    },
+    (NarListSort::NarSize, NarListSortDirection::Asc) => {
+      "nar_size ASC, store_path ASC"
+    },
+    (NarListSort::NarSize, NarListSortDirection::Desc) => {
+      "nar_size DESC, store_path ASC"
+    },
+    (NarListSort::FileSize, NarListSortDirection::Asc) => {
+      "file_size ASC NULLS LAST, store_path ASC"
+    },
+    (NarListSort::FileSize, NarListSortDirection::Desc) => {
+      "file_size DESC NULLS LAST, store_path ASC"
+    },
+    (NarListSort::Compression, NarListSortDirection::Asc) => {
+      "compression ASC, store_path ASC"
+    },
+    (NarListSort::Compression, NarListSortDirection::Desc) => {
+      "compression DESC, store_path ASC"
+    },
+    (NarListSort::CreatedAt, NarListSortDirection::Asc) => {
+      "created_at ASC, store_path ASC"
+    },
+    (NarListSort::CreatedAt, NarListSortDirection::Desc) => {
+      "created_at DESC, store_path ASC"
+    },
+    (NarListSort::LastFetchedAt, NarListSortDirection::Asc) => {
+      "last_fetched_at ASC NULLS LAST, store_path ASC"
+    },
+    (NarListSort::LastFetchedAt, NarListSortDirection::Desc) => {
+      "last_fetched_at DESC NULLS LAST, store_path ASC"
+    },
+  }
+}
+
 /// List NARs for a scope, filtered by store-path hash prefix and/or a
-/// substring of the post-hash package name. Ordered newest-first.
+/// substring of the post-hash package name.
 ///
 /// # Errors
 ///
@@ -310,10 +448,13 @@ pub async fn list_filtered(
   project_id: Option<Uuid>,
   hash_prefix: Option<&str>,
   package_query: Option<&str>,
+  sort: NarListSort,
+  direction: NarListSortDirection,
   limit: i64,
   offset: i64,
 ) -> Result<Vec<NarListItem>> {
-  let rows = sqlx::query_as::<_, NarListItem>(
+  let order_clause = nar_list_order_clause(sort, direction);
+  let query = format!(
     "WITH uploaded AS (SELECT store_path, nar_size, file_size, compression, \
      created_at, last_fetched_at FROM narinfo_cache WHERE ($1::uuid IS NULL \
      OR project_id = $1)), local AS (SELECT DISTINCT ON (path) path AS \
@@ -331,21 +472,22 @@ pub async fn list_filtered(
      NULL OR j.project_id = $1)) candidates WHERE NOT EXISTS (SELECT 1 FROM \
      narinfo_cache n WHERE n.store_path = candidates.path AND ($1::uuid IS \
      NULL OR n.project_id = $1)) ORDER BY path, created_at DESC), inventory \
-     AS (SELECT * FROM uploaded UNION ALL SELECT * FROM local) SELECT \
-     store_path, COALESCE(substring(store_path from \
+     AS (SELECT * FROM uploaded UNION ALL SELECT * FROM local), filtered AS \
+     (SELECT store_path, COALESCE(substring(store_path from \
      '^/nix/store/[^-]+-(.*)$'), store_path) AS package_name, nar_size, \
      file_size, compression, created_at, last_fetched_at FROM inventory WHERE \
      ($2::text IS NULL OR store_path LIKE '/nix/store/' || $2 || '%') AND \
-     ($3::text IS NULL OR store_path LIKE '%-%' || $3 || '%') ORDER BY \
-     created_at DESC LIMIT $4 OFFSET $5",
-  )
-  .bind(project_id)
-  .bind(hash_prefix)
-  .bind(package_query)
-  .bind(limit)
-  .bind(offset)
-  .fetch_all(pool)
-  .await?;
+     ($3::text IS NULL OR store_path LIKE '%-%' || $3 || '%')) SELECT * FROM \
+     filtered ORDER BY {order_clause} LIMIT $4 OFFSET $5"
+  );
+  let rows = sqlx::query_as::<_, NarListItem>(sqlx::AssertSqlSafe(query))
+    .bind(project_id)
+    .bind(hash_prefix)
+    .bind(package_query)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
   Ok(rows)
 }
 

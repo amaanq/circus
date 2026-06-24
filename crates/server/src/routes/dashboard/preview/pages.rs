@@ -652,6 +652,7 @@ pub(super) async fn cache_nars() -> Response {
         store_path:   "/nix/store/9f2c7a113badf00d7e57c-circus-server".into(),
         nar_size:     "1.5 MiB".into(),
         compressed:   "420 KiB".into(),
+        compression:  "zstd".into(),
         created_at:   "2026-06-18 11:45".into(),
         last_fetched: "2026-06-18 11:50".into(),
       },
@@ -661,16 +662,101 @@ pub(super) async fn cache_nars() -> Response {
         store_path:   "/nix/store/a1b2c3d4e5f6a7b8c9d0-circus-agent".into(),
         nar_size:     "2.1 MiB".into(),
         compressed:   "680 KiB".into(),
+        compression:  "zstd".into(),
         created_at:   "2026-06-18 11:30".into(),
         last_fetched: "2026-06-18 11:45".into(),
+      },
+    ],
+    sort_headers:   vec![
+      SortHeaderView {
+        key:         "hash".into(),
+        label:       "Hash".into(),
+        href:        "/caches/global/nars?sort=hash&dir=asc&offset=0&limit=20"
+          .into(),
+        default_dir: "asc".into(),
+        active:      false,
+        indicator:   String::new(),
+        aria_sort:   "none".into(),
+      },
+      SortHeaderView {
+        key:         "package".into(),
+        label:       "Package".into(),
+        href:
+          "/caches/global/nars?sort=package&dir=asc&offset=0&limit=20".into(),
+        default_dir: "asc".into(),
+        active:      false,
+        indicator:   String::new(),
+        aria_sort:   "none".into(),
+      },
+      SortHeaderView {
+        key:         "nar_size".into(),
+        label:       "NAR size".into(),
+        href:
+          "/caches/global/nars?sort=nar_size&dir=desc&offset=0&limit=20"
+            .into(),
+        default_dir: "desc".into(),
+        active:      false,
+        indicator:   String::new(),
+        aria_sort:   "none".into(),
+      },
+      SortHeaderView {
+        key:         "file_size".into(),
+        label:       "File size".into(),
+        href:
+          "/caches/global/nars?sort=file_size&dir=desc&offset=0&limit=20"
+            .into(),
+        default_dir: "desc".into(),
+        active:      false,
+        indicator:   String::new(),
+        aria_sort:   "none".into(),
+      },
+      SortHeaderView {
+        key:         "compression".into(),
+        label:       "Compression".into(),
+        href:
+          "/caches/global/nars?sort=compression&dir=asc&offset=0&limit=20"
+            .into(),
+        default_dir: "asc".into(),
+        active:      false,
+        indicator:   String::new(),
+        aria_sort:   "none".into(),
+      },
+      SortHeaderView {
+        key:         "created_at".into(),
+        label:       "Created".into(),
+        href:
+          "/caches/global/nars?sort=created_at&dir=asc&offset=0&limit=20"
+            .into(),
+        default_dir: "desc".into(),
+        active:      true,
+        indicator:   "desc".into(),
+        aria_sort:   "descending".into(),
+      },
+      SortHeaderView {
+        key:         "last_fetched_at".into(),
+        label:       "Last fetched".into(),
+        href:
+          "/caches/global/nars?sort=last_fetched_at&dir=desc&offset=0&limit=20"
+            .into(),
+        default_dir: "desc".into(),
+        active:      false,
+        indicator:   String::new(),
+        aria_sort:   "none".into(),
       },
     ],
     page:           1,
     total_pages:    2,
     has_prev:       false,
     has_next:       true,
+    prev_href:      "/caches/global/nars?sort=created_at&dir=desc&offset=0&limit=20"
+      .into(),
+    next_href:
+      "/caches/global/nars?sort=created_at&dir=desc&offset=20&limit=20"
+        .into(),
     prev_offset:    0,
     next_offset:    20,
     limit:          20,
+    sort_key:       "created_at".into(),
+    sort_dir:       "desc".into(),
   })
 }

@@ -2283,6 +2283,7 @@ async fn test_admin_cache_nars_filter_by_hash_and_package() {
 
   // Filter by hash prefix: only the bar row matches.
   let by_hash = app
+    .clone()
     .oneshot(
       Request::builder()
         .uri(format!("/api/v1/admin/caches/{name}/nars?hash=bbbb"))
@@ -2299,6 +2300,49 @@ async fn test_admin_cache_nars_filter_by_hash_and_package() {
   let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
   assert_eq!(json["total"], 1);
   assert_eq!(json["items"][0]["package_name"], "barpkg");
+
+  let by_package_sort = app
+    .clone()
+    .oneshot(
+      Request::builder()
+        .uri(format!(
+          "/api/v1/admin/caches/{name}/nars?sort=package&dir=asc"
+        ))
+        .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(by_package_sort.status(), StatusCode::OK);
+  let body = axum::body::to_bytes(by_package_sort.into_body(), usize::MAX)
+    .await
+    .unwrap();
+  let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+  assert_eq!(json["total"], 2);
+  assert_eq!(json["items"][0]["package_name"], "barpkg");
+  assert_eq!(json["items"][1]["package_name"], "foopkg");
+
+  let by_file_size_sort = app
+    .oneshot(
+      Request::builder()
+        .uri(format!(
+          "/api/v1/admin/caches/{name}/nars?sort=file_size&dir=desc"
+        ))
+        .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+  assert_eq!(by_file_size_sort.status(), StatusCode::OK);
+  let body = axum::body::to_bytes(by_file_size_sort.into_body(), usize::MAX)
+    .await
+    .unwrap();
+  let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+  assert_eq!(json["total"], 2);
+  assert_eq!(json["items"][0]["package_name"], "barpkg");
+  assert_eq!(json["items"][1]["package_name"], "foopkg");
 }
 
 #[tokio::test]

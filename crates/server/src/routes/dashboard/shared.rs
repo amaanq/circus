@@ -104,6 +104,16 @@ pub(super) struct CacheNarsParams {
     deserialize_with = "crate::routes::serde_util::empty_string_as_none"
   )]
   pub(super) package: Option<String>,
+  #[serde(
+    default,
+    deserialize_with = "crate::routes::serde_util::empty_string_as_none"
+  )]
+  pub(super) sort:    Option<String>,
+  #[serde(
+    default,
+    deserialize_with = "crate::routes::serde_util::empty_string_as_none"
+  )]
+  pub(super) dir:     Option<String>,
   pub(super) limit:   Option<i64>,
   pub(super) offset:  Option<i64>,
 }

@@ -99,6 +99,11 @@ pkgs.testers.nixosTest {
         assert res["total"] == 1, res
         assert res["items"][0]["package_name"] == "barpkg", res
 
+    with subtest("NAR search sorts by file size"):
+        res = json.loads(machine.succeed(f"curl -sf {auth_header} 'http://127.0.0.1:3000/api/v1/admin/caches/global/nars?sort=file_size&dir=asc'"))
+        names = [item["package_name"] for item in res["items"][:2]]
+        assert names == ["foopkg", "barpkg"], res
+
     with subtest("Timeseries endpoints return JSON arrays"):
         storage = json.loads(machine.succeed(f"curl -sf {auth_header} 'http://127.0.0.1:3000/api/v1/admin/caches/global/storage-timeseries?granularity=hours'"))
         assert "timestamps" in storage and "bytes_added" in storage, storage
@@ -122,6 +127,8 @@ pkgs.testers.nixosTest {
 
         nars = machine.succeed(f"curl -sf {auth_header} http://127.0.0.1:3000/caches/global/nars")
         assert "foopkg" in nars, "NARs page missing seeded package"
+        assert "sort=file_size" in nars, "NARs page missing sortable file-size header"
+        assert "Compression" in nars, "NARs page missing compression column"
 
     with subtest("Serving a narinfo records cache traffic via the flush worker"):
         narinfo = machine.succeed(f"curl -sf http://127.0.0.1:3000/nix-cache/{foo_hash}.narinfo")

@@ -55,6 +55,9 @@
     </div>
 
     <form method="get" action="{{ detail_href }}/nars" class="filter-form">
+        <input type="hidden" name="sort" value="{{ sort_key }}">
+        <input type="hidden" name="dir" value="{{ sort_dir }}">
+        <input type="hidden" name="limit" value="{{ limit }}">
         <label>
             Hash: <input type="text" name="hash" value="{{ filter_hash }}" placeholder="store hash prefix">
         </label>
@@ -73,21 +76,31 @@
         <div class="table-wrap">
             <table>
                 <colgroup>
-                    <col style="width:18%">
-                    <col style="width:30%">
+                    <col style="width:17%">
+                    <col style="width:28%">
+                    <col style="width:11%">
+                    <col style="width:11%">
+                    <col style="width:10%">
+                    <col style="width:11%">
                     <col style="width:12%">
-                    <col style="width:12%">
-                    <col style="width:14%">
-                    <col style="width:14%">
                 </colgroup>
                 <thead>
                     <tr>
-                        <th>Hash</th>
-                        <th>Package</th>
-                        <th>NAR size</th>
-                        <th>Compressed</th>
-                        <th>Created</th>
-                        <th>Last fetched</th>
+                        {% for header in sort_headers %}
+                            <th aria-sort="{{ header.aria_sort }}">
+                                <a
+                                   class="sort-link{% if header.active %} is-active{% endif %}"
+                                   href="{{ header.href }}"
+                                   >
+                                    <span>{{ header.label }}</span>
+                                    <span
+                                          class="sort-indicator{% if header.active %} sort-{{ header.indicator }}{% endif %}"
+                                          aria-hidden="true"
+                                          >
+                                    </span>
+                                </a>
+                            </th>
+                        {% endfor %}
                     </tr>
                 </thead>
                 <tbody>
@@ -104,6 +117,7 @@
                             </td>
                             <td>{{ n.nar_size }}</td>
                             <td>{{ n.compressed }}</td>
+                            <td>{{ n.compression }}</td>
                             <td>{{ n.created_at }}</td>
                             <td>{{ n.last_fetched }}</td>
                         </tr>
@@ -114,15 +128,13 @@
         {% if total_pages > 1 %}
             <nav class="pagination">
                 {% if has_prev %}
-                    <a href="{{ detail_href }}/nars?offset={{ prev_offset }}&limit={{ limit }}&hash={{ filter_hash }}&package={{ filter_package }}"
-                       class="btn btn-small btn-secondary">
+                    <a href="{{ prev_href }}" class="btn btn-small btn-secondary">
                         &laquo; Previous
                     </a>
                 {% endif %}
                 <span class="text-muted">Page {{ page }} of {{ total_pages }}</span>
                 {% if has_next %}
-                    <a href="{{ detail_href }}/nars?offset={{ next_offset }}&limit={{ limit }}&hash={{ filter_hash }}&package={{ filter_package }}"
-                       class="btn btn-small btn-secondary">
+                    <a href="{{ next_href }}" class="btn btn-small btn-secondary">
                         Next &raquo;
                     </a>
                 {% endif %}

@@ -691,6 +691,8 @@ fn document_value() -> Value {
             { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } },
             { "name": "hash", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Store-path hash prefix" },
             { "name": "package", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Package-name substring" },
+            { "name": "sort", "in": "query", "required": false, "schema": { "type": "string", "enum": ["hash", "package", "nar_size", "file_size", "compression", "created_at", "last_fetched_at"] }, "description": "Column used to sort the NAR inventory" },
+            { "name": "dir", "in": "query", "required": false, "schema": { "type": "string", "enum": ["asc", "desc"] }, "description": "Sort direction" },
             { "name": "offset", "in": "query", "required": false, "schema": { "type": "integer" } },
             { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer" } }
           ],
