@@ -1,6 +1,9 @@
 use axum::{extract::Query, response::Response};
 use chrono::{Duration, Utc};
-use circus_common::models::{BuildProduct, BuildStep, SystemStatus};
+use circus_common::{
+  models::{BuildProduct, BuildStep, SystemStatus},
+  repo::builds::{BuildListSort, BuildListSortDirection},
+};
 
 use super::{
   super::{
@@ -84,6 +87,69 @@ pub(super) struct PreviewBuildFilterParams {
     deserialize_with = "crate::routes::serde_util::empty_string_as_none"
   )]
   job_name: Option<String>,
+  #[serde(
+    default,
+    deserialize_with = "crate::routes::serde_util::empty_string_as_none"
+  )]
+  sort:     Option<String>,
+  #[serde(
+    default,
+    deserialize_with = "crate::routes::serde_util::empty_string_as_none"
+  )]
+  dir:      Option<String>,
+}
+
+const PREVIEW_BUILD_SORT_COLUMNS: [(BuildListSort, &str); 8] = [
+  (BuildListSort::Build, "Build"),
+  (BuildListSort::Project, "Project"),
+  (BuildListSort::Jobset, "Jobset"),
+  (BuildListSort::Job, "Job"),
+  (BuildListSort::System, "System"),
+  (BuildListSort::Status, "Status"),
+  (BuildListSort::Duration, "Duration"),
+  (BuildListSort::CreatedAt, "Created"),
+];
+
+fn preview_build_sort_headers(
+  active_sort: BuildListSort,
+  active_dir: BuildListSortDirection,
+) -> Vec<SortHeaderView> {
+  PREVIEW_BUILD_SORT_COLUMNS
+    .iter()
+    .map(|(sort, label)| {
+      let active = active_sort == *sort;
+      let next_dir = if active {
+        active_dir.toggle()
+      } else {
+        sort.default_direction()
+      };
+      SortHeaderView {
+        key: sort.as_param().to_string(),
+        label: (*label).to_string(),
+        href: format!(
+          "/builds?sort={}&dir={}&offset=0&limit=20",
+          sort.as_param(),
+          next_dir.as_param(),
+        ),
+        default_dir: sort.default_direction().as_param().to_string(),
+        active,
+        indicator: if active {
+          active_dir.as_param().to_string()
+        } else {
+          String::new()
+        },
+        aria_sort: if active {
+          match active_dir {
+            BuildListSortDirection::Asc => "ascending",
+            BuildListSortDirection::Desc => "descending",
+          }
+        } else {
+          "none"
+        }
+        .to_string(),
+      }
+    })
+    .collect()
 }
 
 pub(super) async fn home() -> Response {
@@ -257,9 +323,22 @@ pub(super) async fn builds(
   let status = params.status.unwrap_or_default();
   let system = params.system.unwrap_or_default();
   let job_name = params.job_name.unwrap_or_default();
+  let sort = BuildListSort::from_param(params.sort.as_deref());
+  let dir = BuildListSortDirection::from_param(params.dir.as_deref(), sort);
   let status_filter = status.to_lowercase();
   let system_filter = system.to_lowercase();
   let job_filter = job_name.to_lowercase();
+  let sort_headers = preview_build_sort_headers(sort, dir);
+  let prev_href = format!(
+    "/builds?sort={}&dir={}&offset=0&limit=20",
+    sort.as_param(),
+    dir.as_param(),
+  );
+  let next_href = format!(
+    "/builds?sort={}&dir={}&offset=20&limit=20",
+    sort.as_param(),
+    dir.as_param(),
+  );
   let builds = builds_fixture()
     .into_iter()
     .filter(|build| {
@@ -281,6 +360,8 @@ pub(super) async fn builds(
     limit: 20,
     has_prev: false,
     has_next: false,
+    prev_href,
+    next_href,
     prev_offset: 0,
     next_offset: 20,
     page: 1,
@@ -288,6 +369,9 @@ pub(super) async fn builds(
     filter_status: status,
     filter_system: system,
     filter_job: job_name,
+    sort_headers,
+    sort_key: sort.as_param().to_string(),
+    sort_dir: dir.as_param().to_string(),
     is_admin: true,
     auth_name: "operator".into(),
   })

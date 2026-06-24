@@ -54,6 +54,7 @@ use super::{
     JobsetTemplate,
     ProjectTemplate,
     ProjectsTemplate,
+    SortHeaderView,
     UiTemplateConfig,
   },
 };
@@ -130,8 +131,131 @@ pub(super) struct BuildFilterParams {
     deserialize_with = "crate::routes::serde_util::empty_string_as_none"
   )]
   job_name: Option<String>,
+  #[serde(
+    default,
+    deserialize_with = "crate::routes::serde_util::empty_string_as_none"
+  )]
+  sort:     Option<String>,
+  #[serde(
+    default,
+    deserialize_with = "crate::routes::serde_util::empty_string_as_none"
+  )]
+  dir:      Option<String>,
   limit:    Option<i64>,
   offset:   Option<i64>,
+}
+
+const BUILD_SORT_COLUMNS: [(
+  circus_common::repo::builds::BuildListSort,
+  &str,
+); 8] = [
+  (circus_common::repo::builds::BuildListSort::Build, "Build"),
+  (
+    circus_common::repo::builds::BuildListSort::Project,
+    "Project",
+  ),
+  (
+    circus_common::repo::builds::BuildListSort::Jobset,
+    "Jobset",
+  ),
+  (circus_common::repo::builds::BuildListSort::Job, "Job"),
+  (
+    circus_common::repo::builds::BuildListSort::System,
+    "System",
+  ),
+  (
+    circus_common::repo::builds::BuildListSort::Status,
+    "Status",
+  ),
+  (
+    circus_common::repo::builds::BuildListSort::Duration,
+    "Duration",
+  ),
+  (
+    circus_common::repo::builds::BuildListSort::CreatedAt,
+    "Created",
+  ),
+];
+
+fn builds_href(
+  filter_status: &str,
+  filter_system: &str,
+  filter_job: &str,
+  sort: circus_common::repo::builds::BuildListSort,
+  dir: circus_common::repo::builds::BuildListSortDirection,
+  offset: i64,
+  limit: i64,
+) -> String {
+  let mut params = vec![
+    format!("sort={}", sort.as_param()),
+    format!("dir={}", dir.as_param()),
+    format!("offset={offset}"),
+    format!("limit={limit}"),
+  ];
+  if !filter_status.is_empty() {
+    params.push(format!("status={}", urlencoding::encode(filter_status)));
+  }
+  if !filter_system.is_empty() {
+    params.push(format!("system={}", urlencoding::encode(filter_system)));
+  }
+  if !filter_job.is_empty() {
+    params.push(format!("job_name={}", urlencoding::encode(filter_job)));
+  }
+  format!("/builds?{}", params.join("&"))
+}
+
+fn build_sort_headers(
+  filter_status: &str,
+  filter_system: &str,
+  filter_job: &str,
+  active_sort: circus_common::repo::builds::BuildListSort,
+  active_dir: circus_common::repo::builds::BuildListSortDirection,
+  limit: i64,
+) -> Vec<SortHeaderView> {
+  BUILD_SORT_COLUMNS
+    .iter()
+    .map(|(sort, label)| {
+      let active = active_sort == *sort;
+      let next_dir = if active {
+        active_dir.toggle()
+      } else {
+        sort.default_direction()
+      };
+      SortHeaderView {
+        key: sort.as_param().to_string(),
+        label: (*label).to_string(),
+        href: builds_href(
+          filter_status,
+          filter_system,
+          filter_job,
+          *sort,
+          next_dir,
+          0,
+          limit,
+        ),
+        default_dir: sort.default_direction().as_param().to_string(),
+        active,
+        indicator: if active {
+          active_dir.as_param().to_string()
+        } else {
+          String::new()
+        },
+        aria_sort: if active {
+          match active_dir {
+            circus_common::repo::builds::BuildListSortDirection::Asc => {
+              "ascending"
+            },
+            circus_common::repo::builds::BuildListSortDirection::Desc => {
+              "descending"
+            },
+          }
+        } else {
+          "none"
+        }
+        .to_string(),
+      }
+    })
+    .collect()
 }
 
 #[derive(serde::Deserialize)]
@@ -687,12 +811,24 @@ pub(super) async fn builds_page(
   enforce_page_access(&state.config, &ctx, DashboardPage::Builds)?;
   let limit = params.limit.unwrap_or(50).clamp(1, 200);
   let offset = params.offset.unwrap_or(0).max(0);
-  let items = circus_common::repo::builds::list_filtered(
+  let filter_status = params.status.clone().unwrap_or_default();
+  let filter_system = params.system.clone().unwrap_or_default();
+  let filter_job = params.job_name.clone().unwrap_or_default();
+  let sort = circus_common::repo::builds::BuildListSort::from_param(
+    params.sort.as_deref(),
+  );
+  let dir = circus_common::repo::builds::BuildListSortDirection::from_param(
+    params.dir.as_deref(),
+    sort,
+  );
+  let items = circus_common::repo::builds::list_filtered_sorted(
     &state.pool,
     None,
     params.status.as_deref(),
     params.system.as_deref(),
     params.job_name.as_deref(),
+    sort,
+    dir,
     limit,
     offset,
   )
@@ -709,6 +845,32 @@ pub(super) async fn builds_page(
   .unwrap_or(0);
 
   let pagination = Pagination::new(total, offset, limit);
+  let sort_headers = build_sort_headers(
+    &filter_status,
+    &filter_system,
+    &filter_job,
+    sort,
+    dir,
+    limit,
+  );
+  let prev_href = builds_href(
+    &filter_status,
+    &filter_system,
+    &filter_job,
+    sort,
+    dir,
+    pagination.prev_offset,
+    limit,
+  );
+  let next_href = builds_href(
+    &filter_status,
+    &filter_system,
+    &filter_job,
+    sort,
+    dir,
+    pagination.next_offset,
+    limit,
+  );
 
   let mut context_by_eval = HashMap::new();
   for item in &items {
@@ -770,13 +932,18 @@ pub(super) async fn builds_page(
     limit,
     has_prev: pagination.has_prev,
     has_next: pagination.has_next,
+    prev_href,
+    next_href,
     prev_offset: pagination.prev_offset,
     next_offset: pagination.next_offset,
     page: pagination.page,
     total_pages: pagination.total_pages,
-    filter_status: params.status.unwrap_or_default(),
-    filter_system: params.system.unwrap_or_default(),
-    filter_job: params.job_name.unwrap_or_default(),
+    filter_status,
+    filter_system,
+    filter_job,
+    sort_headers,
+    sort_key: sort.as_param().to_string(),
+    sort_dir: dir.as_param().to_string(),
     is_admin: ctx.is_admin,
     auth_name: ctx.auth_name.clone(),
   };
@@ -939,16 +1106,22 @@ mod tests {
   #[test]
   fn blank_filter_params_deserialize_to_none() {
     let params = serde_urlencoded::from_str::<BuildFilterParams>(
-      "offset=50&limit=50&status=&system=&job_name=",
+      "offset=50&limit=50&status=&system=&job_name=&sort=&dir=",
     )
     .expect("deserialize query");
     assert_eq!(params.status, None);
     assert_eq!(params.system, None);
     assert_eq!(params.job_name, None);
+    assert_eq!(params.sort, None);
+    assert_eq!(params.dir, None);
     assert_eq!(params.offset, Some(50));
 
-    let kept = serde_urlencoded::from_str::<BuildFilterParams>("status=failed")
-      .expect("deserialize query");
+    let kept = serde_urlencoded::from_str::<BuildFilterParams>(
+      "status=failed&sort=job&dir=asc",
+    )
+    .expect("deserialize query");
     assert_eq!(kept.status.as_deref(), Some("failed"));
+    assert_eq!(kept.sort.as_deref(), Some("job"));
+    assert_eq!(kept.dir.as_deref(), Some("asc"));
   }
 }

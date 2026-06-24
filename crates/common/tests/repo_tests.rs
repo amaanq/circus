@@ -881,6 +881,69 @@ async fn test_list_filtered_with_job_name_filter() {
 }
 
 #[tokio::test]
+async fn test_list_filtered_sorted_orders_builds() {
+  let Some(pool) = get_pool().await else {
+    return;
+  };
+
+  let marker = uuid::Uuid::new_v4().simple().to_string();
+  let prefix_a = format!("sort-a-{marker}");
+  let prefix_b = format!("sort-b-{marker}");
+  let project_a = create_test_project(&pool, &prefix_a).await;
+  let project_b = create_test_project(&pool, &prefix_b).await;
+  let jobset_a = create_test_jobset(&pool, project_a.id).await;
+  let jobset_b = create_test_jobset(&pool, project_b.id).await;
+  let eval_a = create_test_eval(&pool, jobset_a.id).await;
+  let eval_b = create_test_eval(&pool, jobset_b.id).await;
+
+  let job_a = format!("{marker}-zeta");
+  let job_b = format!("{marker}-alpha");
+  let drv_a = format!("/nix/store/{}.drv", uuid::Uuid::new_v4().simple());
+  let drv_b = format!("/nix/store/{}.drv", uuid::Uuid::new_v4().simple());
+  create_test_build(&pool, eval_a.id, &job_a, &drv_a, Some("x86_64-linux"))
+    .await;
+  create_test_build(&pool, eval_b.id, &job_b, &drv_b, Some("aarch64-linux"))
+    .await;
+
+  let by_project = repo::builds::list_filtered_sorted(
+    &pool,
+    None,
+    None,
+    None,
+    Some(&marker),
+    repo::builds::BuildListSort::Project,
+    repo::builds::BuildListSortDirection::Asc,
+    50,
+    0,
+  )
+  .await
+  .expect("sort by project");
+  assert_eq!(by_project.len(), 2);
+  assert_eq!(by_project[0].job_name, job_a);
+  assert_eq!(by_project[1].job_name, job_b);
+
+  let by_job = repo::builds::list_filtered_sorted(
+    &pool,
+    None,
+    None,
+    None,
+    Some(&marker),
+    repo::builds::BuildListSort::Job,
+    repo::builds::BuildListSortDirection::Asc,
+    50,
+    0,
+  )
+  .await
+  .expect("sort by job");
+  assert_eq!(by_job.len(), 2);
+  assert_eq!(by_job[0].job_name, job_b);
+  assert_eq!(by_job[1].job_name, job_a);
+
+  let _ = repo::projects::delete(&pool, project_a.id).await;
+  let _ = repo::projects::delete(&pool, project_b.id).await;
+}
+
+#[tokio::test]
 async fn test_reset_orphaned_batch_limit() {
   let Some(pool) = get_pool().await else {
     return;

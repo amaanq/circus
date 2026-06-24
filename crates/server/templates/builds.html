@@ -14,6 +14,9 @@
     <h1>Builds</h1>
 
     <form method="get" action="/builds" class="filter-form">
+        <input type="hidden" name="sort" value="{{ sort_key }}">
+        <input type="hidden" name="dir" value="{{ sort_dir }}">
+        <input type="hidden" name="limit" value="{{ limit }}">
         <label>
             Status:
             <select name="status">
@@ -43,14 +46,21 @@
             <table class="data-table dense-table">
                 <thead>
                     <tr>
-                        <th>Build</th>
-                        <th>Project</th>
-                        <th>Jobset</th>
-                        <th>Job</th>
-                        <th>System</th>
-                        <th>Status</th>
-                        <th>Duration</th>
-                        <th>Created</th>
+                        {% for header in sort_headers %}
+                            <th aria-sort="{{ header.aria_sort }}">
+                                <a
+                                   class="sort-link{% if header.active %} is-active{% endif %}"
+                                   href="{{ header.href }}"
+                                   >
+                                    <span>{{ header.label }}</span>
+                                    <span
+                                          class="sort-indicator{% if header.active %} sort-{{ header.indicator }}{% endif %}"
+                                          aria-hidden="true"
+                                          >
+                                    </span>
+                                </a>
+                            </th>
+                        {% endfor %}
                         <th>Log</th>
                     </tr>
                 </thead>
@@ -102,15 +112,13 @@
         {% if total_pages > 1 %}
             <nav class="pagination">
                 {% if has_prev %}
-                    <a href="/builds?offset={{ prev_offset }}&limit={{ limit }}&status={{ filter_status }}&system={{ filter_system }}&job_name={{ filter_job }}"
-                       class="btn btn-small btn-secondary">
+                    <a href="{{ prev_href }}" class="btn btn-small btn-secondary">
                         &laquo; Previous
                     </a>
                 {% endif %}
                 <span class="text-muted">Page {{ page }} of {{ total_pages }}</span>
                 {% if has_next %}
-                    <a href="/builds?offset={{ next_offset }}&limit={{ limit }}&status={{ filter_status }}&system={{ filter_system }}&job_name={{ filter_job }}"
-                       class="btn btn-small btn-secondary">
+                    <a href="{{ next_href }}" class="btn btn-small btn-secondary">
                         Next &raquo;
                     </a>
                 {% endif %}

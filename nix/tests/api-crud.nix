@@ -257,6 +257,15 @@ testers.runNixOSTest {
         )
         assert result.strip().lower() == "failed", f"Expected failed, got: {result.strip()}"
 
+    with subtest("Builds page renders active sort header"):
+        body = machine.succeed(
+            "curl -sf 'http://127.0.0.1:3000/builds?status=failed&system=x86_64-linux&sort=job&dir=asc'"
+        )
+        assert "sort-link is-active" in body, "Builds page missing active sort header"
+        assert 'aria-sort="ascending"' in body, "Builds page missing ascending sort state"
+        assert "sort=job&amp;dir=desc" in body, "Builds page missing sort toggle link"
+        assert "hello" in body, "Builds page missing seeded build row"
+
     with subtest("Restart failed build"):
         result = machine.succeed(
             f"curl -sf -X POST http://127.0.0.1:3000/api/v1/builds/{test_build_id}/restart "

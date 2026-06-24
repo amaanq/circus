@@ -8,6 +8,162 @@ use crate::{
   models::{Build, BuildStats, BuildStatus, CreateBuild},
 };
 
+/// Sortable columns for build listings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildListSort {
+  Build,
+  Project,
+  Jobset,
+  Job,
+  System,
+  Status,
+  Duration,
+  CreatedAt,
+}
+
+impl BuildListSort {
+  #[must_use]
+  pub fn from_param(param: Option<&str>) -> Self {
+    match param {
+      Some("build") | Some("id") => Self::Build,
+      Some("project") => Self::Project,
+      Some("jobset") => Self::Jobset,
+      Some("job") | Some("job_name") => Self::Job,
+      Some("system") => Self::System,
+      Some("status") => Self::Status,
+      Some("duration") => Self::Duration,
+      Some("created_at") | Some("created") => Self::CreatedAt,
+      _ => Self::CreatedAt,
+    }
+  }
+
+  #[must_use]
+  pub const fn as_param(self) -> &'static str {
+    match self {
+      Self::Build => "build",
+      Self::Project => "project",
+      Self::Jobset => "jobset",
+      Self::Job => "job",
+      Self::System => "system",
+      Self::Status => "status",
+      Self::Duration => "duration",
+      Self::CreatedAt => "created_at",
+    }
+  }
+
+  #[must_use]
+  pub const fn default_direction(self) -> BuildListSortDirection {
+    match self {
+      Self::Build | Self::Duration | Self::CreatedAt => {
+        BuildListSortDirection::Desc
+      },
+      Self::Project
+      | Self::Jobset
+      | Self::Job
+      | Self::System
+      | Self::Status => BuildListSortDirection::Asc,
+    }
+  }
+}
+
+/// Sort direction for build listings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildListSortDirection {
+  Asc,
+  Desc,
+}
+
+impl BuildListSortDirection {
+  #[must_use]
+  pub fn from_param(param: Option<&str>, sort: BuildListSort) -> Self {
+    match param {
+      Some("asc") => Self::Asc,
+      Some("desc") => Self::Desc,
+      _ => sort.default_direction(),
+    }
+  }
+
+  #[must_use]
+  pub const fn as_param(self) -> &'static str {
+    match self {
+      Self::Asc => "asc",
+      Self::Desc => "desc",
+    }
+  }
+
+  #[must_use]
+  pub const fn toggle(self) -> Self {
+    match self {
+      Self::Asc => Self::Desc,
+      Self::Desc => Self::Asc,
+    }
+  }
+}
+
+fn build_list_order_clause(
+  sort: BuildListSort,
+  direction: BuildListSortDirection,
+) -> &'static str {
+  match (sort, direction) {
+    (BuildListSort::Build, BuildListSortDirection::Asc) => {
+      "b.id ASC, b.created_at DESC"
+    },
+    (BuildListSort::Build, BuildListSortDirection::Desc) => {
+      "b.id DESC, b.created_at DESC"
+    },
+    (BuildListSort::Project, BuildListSortDirection::Asc) => {
+      "p.name ASC NULLS LAST, j.name ASC NULLS LAST, b.job_name ASC, \
+       b.created_at DESC"
+    },
+    (BuildListSort::Project, BuildListSortDirection::Desc) => {
+      "p.name DESC NULLS LAST, j.name ASC NULLS LAST, b.job_name ASC, \
+       b.created_at DESC"
+    },
+    (BuildListSort::Jobset, BuildListSortDirection::Asc) => {
+      "j.name ASC NULLS LAST, p.name ASC NULLS LAST, b.job_name ASC, \
+       b.created_at DESC"
+    },
+    (BuildListSort::Jobset, BuildListSortDirection::Desc) => {
+      "j.name DESC NULLS LAST, p.name ASC NULLS LAST, b.job_name ASC, \
+       b.created_at DESC"
+    },
+    (BuildListSort::Job, BuildListSortDirection::Asc) => {
+      "b.job_name ASC, b.created_at DESC"
+    },
+    (BuildListSort::Job, BuildListSortDirection::Desc) => {
+      "b.job_name DESC, b.created_at DESC"
+    },
+    (BuildListSort::System, BuildListSortDirection::Asc) => {
+      "b.system ASC NULLS LAST, b.job_name ASC, b.created_at DESC"
+    },
+    (BuildListSort::System, BuildListSortDirection::Desc) => {
+      "b.system DESC NULLS LAST, b.job_name ASC, b.created_at DESC"
+    },
+    (BuildListSort::Status, BuildListSortDirection::Asc) => {
+      "b.status ASC, b.created_at DESC"
+    },
+    (BuildListSort::Status, BuildListSortDirection::Desc) => {
+      "b.status DESC, b.created_at DESC"
+    },
+    (BuildListSort::Duration, BuildListSortDirection::Asc) => {
+      "CASE WHEN b.started_at IS NULL THEN 0 ELSE EXTRACT(EPOCH FROM \
+       (COALESCE(b.completed_at, NOW()) - b.started_at)) END ASC, \
+       b.created_at DESC"
+    },
+    (BuildListSort::Duration, BuildListSortDirection::Desc) => {
+      "CASE WHEN b.started_at IS NULL THEN 0 ELSE EXTRACT(EPOCH FROM \
+       (COALESCE(b.completed_at, NOW()) - b.started_at)) END DESC, \
+       b.created_at DESC"
+    },
+    (BuildListSort::CreatedAt, BuildListSortDirection::Asc) => {
+      "b.created_at ASC, b.id ASC"
+    },
+    (BuildListSort::CreatedAt, BuildListSortDirection::Desc) => {
+      "b.created_at DESC, b.id ASC"
+    },
+  }
+}
+
 /// Create a new build record in pending state.
 ///
 /// # Errors
@@ -439,13 +595,53 @@ pub async fn list_filtered(
   limit: i64,
   offset: i64,
 ) -> Result<Vec<Build>> {
+  list_filtered_sorted(
+    pool,
+    evaluation_id,
+    status,
+    system,
+    job_name,
+    BuildListSort::CreatedAt,
+    BuildListSortDirection::Desc,
+    limit,
+    offset,
+  )
+  .await
+}
+
+/// List builds with optional filters and caller-selected sort order, with
+/// pagination.
+///
+/// # Errors
+///
+/// Returns error if database query fails.
+#[expect(
+  clippy::too_many_arguments,
+  reason = "repository filter API mirrors build-list query parameters"
+)]
+pub async fn list_filtered_sorted(
+  pool: &PgPool,
+  evaluation_id: Option<Uuid>,
+  status: Option<&str>,
+  system: Option<&str>,
+  job_name: Option<&str>,
+  sort: BuildListSort,
+  direction: BuildListSortDirection,
+  limit: i64,
+  offset: i64,
+) -> Result<Vec<Build>> {
+  let order_clause = build_list_order_clause(sort, direction);
+  let query = format!(
+    "SELECT b.* FROM builds b LEFT JOIN evaluations e ON e.id = \
+     b.evaluation_id LEFT JOIN jobsets j ON j.id = e.jobset_id LEFT JOIN \
+     projects p ON p.id = j.project_id WHERE ($1::uuid IS NULL OR \
+     b.evaluation_id = $1) AND ($2::text IS NULL OR b.status = $2) AND \
+     ($3::text IS NULL OR b.system = $3) AND ($4::text IS NULL OR \
+     b.job_name ILIKE '%' || $4 || '%') ORDER BY {order_clause} LIMIT $5 \
+     OFFSET $6"
+  );
   Ok(
-    sqlx::query_as::<_, Build>(
-      "SELECT * FROM builds WHERE ($1::uuid IS NULL OR evaluation_id = $1) \
-       AND ($2::text IS NULL OR status = $2) AND ($3::text IS NULL OR system \
-       = $3) AND ($4::text IS NULL OR job_name ILIKE '%' || $4 || '%') ORDER \
-       BY created_at DESC LIMIT $5 OFFSET $6",
-    )
+    sqlx::query_as::<_, Build>(sqlx::AssertSqlSafe(query))
     .bind(evaluation_id)
     .bind(status)
     .bind(system)

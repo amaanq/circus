@@ -158,6 +158,8 @@ pub(super) struct BuildsTemplate {
   pub(super) limit:         i64,
   pub(super) has_prev:      bool,
   pub(super) has_next:      bool,
+  pub(super) prev_href:     String,
+  pub(super) next_href:     String,
   pub(super) prev_offset:   i64,
   pub(super) next_offset:   i64,
   pub(super) page:          i64,
@@ -165,6 +167,9 @@ pub(super) struct BuildsTemplate {
   pub(super) filter_status: String,
   pub(super) filter_system: String,
   pub(super) filter_job:    String,
+  pub(super) sort_headers:  Vec<SortHeaderView>,
+  pub(super) sort_key:      String,
+  pub(super) sort_dir:      String,
   pub(super) is_admin:      bool,
   pub(super) auth_name:     String,
 }
