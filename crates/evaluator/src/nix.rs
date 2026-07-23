@@ -331,8 +331,52 @@ fn eval_allowed_uris(
   Ok(uris)
 }
 
-#[tracing::instrument(skip(config, inputs, source))]
+/// Evaluate the flake, walking down to the local checkout when a forge source
+/// cannot be fetched (private repo, or forge unreachable). The checkout
+/// evaluates from disk and so cannot hash-match public builds.
 async fn evaluate_flake(
+  repo_path: &Path,
+  mut source: &SourceFlakeRef,
+  nix_expression: &str,
+  timeout: Duration,
+  config: &EvaluatorConfig,
+  inputs: &[JobsetInput],
+  cancel: &CancellationToken,
+  worker_exe: Option<&Path>,
+) -> Result<EvalResult> {
+  loop {
+    match evaluate_flake_source(
+      repo_path,
+      source,
+      nix_expression,
+      timeout,
+      config,
+      inputs,
+      cancel,
+      worker_exe,
+    )
+    .await
+    {
+      Err(CiError::NixEval(message))
+        if eval_command::is_source_fetch_failure(&message) =>
+      {
+        let Some(fallback) = source.local_fallback.as_deref() else {
+          return Err(CiError::NixEval(message));
+        };
+        tracing::warn!(
+          unfetchable = %source.flake_ref,
+          checkout = %fallback.flake_ref,
+          "Flake source could not be fetched; evaluating the local checkout"
+        );
+        source = fallback;
+      },
+      result => return result,
+    }
+  }
+}
+
+#[tracing::instrument(skip(config, inputs, source))]
+async fn evaluate_flake_source(
   repo_path: &Path,
   source: &SourceFlakeRef,
   nix_expression: &str,

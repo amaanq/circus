@@ -24,10 +24,14 @@
 //! is a normal working tree that already contains the resolved commit, and a
 //! local source has no public-forge hash to reproduce anyway.
 //!
-//! TODO: for private repositories the forge fetcher needs its own credentials
-//! (Nix `access-tokens` / netrc); Circus's git clone credentials do not carry
-//! over to the in-process fetcher. We've got to fix this for Evix, or more
-//! directly, in the C API bindings.
+//! Private repositories are the sharp edge: the forge fetcher needs its own
+//! credentials (Nix `access-tokens` / netrc), which Circus's git clone
+//! credentials do not carry into the in-process fetcher. Until that is wired
+//! through Evix (or more directly the C API bindings), every remote ref keeps
+//! the local checkout as a `local_fallback`: when the forge source cannot be
+//! fetched (private repo, forge outage) the evaluator retries against the
+//! checkout on disk, trading the public-build hash-identity a private repo
+//! never had for a successful evaluation.
 
 use std::path::Path;
 
@@ -36,10 +40,25 @@ use std::path::Path;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFlakeRef {
   /// Pinned flake reference handed to the evaluator, e.g. `github:o/r/<rev>`.
-  pub flake_ref:    String,
+  pub flake_ref:      String,
   /// `checkURI`-acceptable prefixes (no rev/query) used when `restrict-eval`
   /// is enabled so the root source itself stays fetchable.
-  pub allowed_uris: Vec<String>,
+  pub allowed_uris:   Vec<String>,
+  /// Local-checkout ref to retry with when the primary (forge) source cannot
+  /// be fetched: a private repository whose credentials do not reach the
+  /// in-process Nix fetcher, or a transient forge outage. `None` when the
+  /// primary is already the local checkout (nothing to fall back to).
+  pub local_fallback: Option<Box<Self>>,
+}
+
+impl SourceFlakeRef {
+  /// Attach the local-checkout retry source (see
+  /// [`SourceFlakeRef::local_fallback`]).
+  #[must_use]
+  fn with_local_fallback(mut self, fallback: Self) -> Self {
+    self.local_fallback = Some(Box::new(fallback));
+    self
+  }
 }
 
 /// Build the canonical [`SourceFlakeRef`] for `repository_url` at `rev`.
@@ -154,12 +173,17 @@ impl ParsedRepo {
 
     let segments = path.split('/').filter(|s| !s.is_empty()).count();
 
-    match host.as_str() {
+    let primary = match host.as_str() {
       "github.com" if segments == 2 => forge_ref("github", &path, rev),
       "gitlab.com" if segments == 2 => forge_ref("gitlab", &path, rev),
       "git.sr.ht" if segments == 2 => forge_ref("sourcehut", &path, rev),
       _ => generic_git_ref(&scheme, user.as_deref(), &host, &path, rev),
-    }
+    };
+
+    // A remote forge source may be unfetchable in-process (private repo whose
+    // credentials never reach the Nix fetcher, or a forge outage); keep the
+    // local checkout so evaluation can still proceed. See module docs.
+    primary.with_local_fallback(local_git_ref(repo_path, rev))
   }
 }
 
@@ -200,6 +224,7 @@ fn pinned(base: &str, rev: &str) -> SourceFlakeRef {
   SourceFlakeRef {
     allowed_uris: scheme_url_and_parent(base),
     flake_ref,
+    local_fallback: None,
   }
 }
 
@@ -217,6 +242,7 @@ fn forge_ref(forge: &str, path: &str, rev: &str) -> SourceFlakeRef {
   SourceFlakeRef {
     flake_ref,
     allowed_uris: vec![allowed],
+    local_fallback: None,
   }
 }
 
@@ -396,5 +422,35 @@ mod tests {
     assert_eq!(r.flake_ref, "github:owner/repo");
     let g = sref("https://git.example.com/owner/repo", "");
     assert_eq!(g.flake_ref, "git+https://git.example.com/owner/repo");
+  }
+
+  #[test]
+  fn remote_refs_carry_a_local_checkout_fallback() {
+    // Every remote source keeps the checkout as a fallback for when the forge
+    // fetcher cannot reach a private or unavailable repository.
+    let forge = sref("https://github.com/owner/repo", REV);
+    let fallback = forge
+      .local_fallback
+      .as_deref()
+      .expect("forge ref must carry a local fallback");
+    assert_eq!(
+      fallback.flake_ref,
+      "git+file:///var/lib/circus/evaluator/proj?rev=abc123def456"
+    );
+    assert!(fallback.local_fallback.is_none());
+
+    let generic = sref("https://git.example.com/owner/repo", REV);
+    assert!(generic.local_fallback.is_some());
+  }
+
+  #[test]
+  fn local_refs_have_no_fallback() {
+    // The primary is already the checkout, so there is nothing to fall back to.
+    let local = source_flake_ref(
+      "/var/lib/circus/test-repos/test-flake.git",
+      REV,
+      Path::new(CHECKOUT),
+    );
+    assert!(local.local_fallback.is_none());
   }
 }

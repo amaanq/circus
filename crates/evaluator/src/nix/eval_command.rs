@@ -187,6 +187,32 @@ fn is_resource_exhaustion(error: &str) -> bool {
     || error.contains("os error 11")
 }
 
+// evix flattens Nix errors to a string, so a source-fetch failure (download,
+// DNS, or auth) can only be told apart from an eval failure by the text Nix
+// emits. These are the phrases Nix uses when a flake source cannot be fetched.
+pub(super) fn is_source_fetch_failure(error: &str) -> bool {
+  const SIGNATURES: &[&str] = &[
+    "unable to download",
+    "unable to fetch",
+    "couldn't resolve host",
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "network is unreachable",
+    "connection refused",
+    "connection timed out",
+    "couldn't connect to server",
+    "http error 401",
+    "http error 403",
+    "http error 404",
+    "could not read username",
+    "authentication failed",
+    "permission denied (publickey",
+    "repository not found",
+  ];
+  let haystack = error.to_ascii_lowercase();
+  SIGNATURES.iter().any(|needle| haystack.contains(needle))
+}
+
 const fn retry_workers(workers: usize) -> Option<usize> {
   if workers > 1 {
     Some(workers.div_ceil(2))
@@ -269,6 +295,29 @@ mod policy_tests {
        error 11)"
     ));
     assert!(!is_resource_exhaustion("access to URI is forbidden"));
+  }
+
+  #[test]
+  fn recognizes_source_fetch_failures() {
+    // Private github repo without an in-process token surfaces as a 404.
+    assert!(is_source_fetch_failure(
+      "error: unable to download \
+       'https://api.github.com/repos/o/r/tarball/deadbeef': HTTP error 404"
+    ));
+    // git+https private repo with no credentials.
+    assert!(is_source_fetch_failure(
+      "fatal: could not read Username for 'https://github.com': terminal \
+       prompts disabled"
+    ));
+    // Offline / forge outage.
+    assert!(is_source_fetch_failure(
+      "error: unable to download 'https://github.com/o/r': Could not resolve \
+       host: github.com"
+    ));
+    // A genuine evaluation error must not be mistaken for a fetch failure.
+    assert!(!is_source_fetch_failure(
+      r#"fragment attr "packages": Key not found: packages"#
+    ));
   }
 
   #[test]
