@@ -49,6 +49,28 @@ jobs:
               - 'flake.nix'
               - 'flake.lock'
 
+  matrices:
+    name: Generate Matrices
+    needs: changes
+    if: ${{ needs.changes.outputs.files_changed == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.gen.outputs.packages }}
+      checks: ${{ steps.gen.outputs.checks }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b97f05dcb019ddea06450a50ef6203d2fdc19fee # v31
+      - id: gen
+        run: |
+          echo "packages=$(nix eval .#packages.x86_64-linux --json \
+            --apply 'ps: builtins.filter (n: !builtins.elem n ["demo-vm" "ci-cargo-artifacts"]) (builtins.attrNames ps)')" >> "$GITHUB_OUTPUT"
+          # caches is excluded because its seeded narinfo sigs cannot pass the
+          # provenance gate, it has never run in CI and needs its own fix.
+          echo "checks=$(nix eval .#checks.x86_64-linux --json \
+            --apply 'cs: builtins.filter (n: !builtins.elem n ["full" "cargo-deny" "formatting" "codegen-up-to-date" "caches"]) (builtins.attrNames cs)')" >> "$GITHUB_OUTPUT"
+
   build-packages:
     name: Build Packages
     needs: changes
@@ -83,19 +105,13 @@ jobs:
 
   build:
     name: Build ${{ matrix.package }}
-    needs: [changes, build-packages]
+    needs: [changes, matrices, build-packages]
     if: ${{ needs.changes.outputs.files_changed == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        package:
-          - circus-cli
-          - circus-agent
-          - circus-agent-static
-          - circus-evaluator
-          - circus-queue-runner
-          - circus-server
+        package: ${{ fromJSON(needs.matrices.outputs.packages) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -112,44 +128,14 @@ jobs:
         run: nix build .#${{ matrix.package }} -L --no-link
 
   vm-test:
-    name: ${{ matrix.name }}
-    needs: [changes, build-packages]
+    name: ${{ matrix.check }}
+    needs: [changes, matrices, build-packages]
     if: ${{ needs.changes.outputs.files_changed == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Service Startup
-            check: service-startup
-          - name: Basic API
-            check: basic-api
-          - name: Auth RBAC
-            check: auth-rbac
-          - name: API CRUD
-            check: api-crud
-          - name: Features
-            check: features
-          - name: Webhooks
-            check: webhooks
-          - name: E2E
-            check: e2e
-          - name: Declarative
-            check: declarative
-          - name: Distributed
-            check: distributed
-          - name: Agent Dispatch
-            check: agent-dispatch
-          - name: GC Pinning
-            check: gc-pinning
-          - name: Machine Health
-            check: machine-health
-          - name: Channel Tarball
-            check: channel-tarball
-          - name: Capability Scheduling
-            check: capability-scheduling
-          - name: S3 Cache
-            check: s3-cache
+        check: ${{ fromJSON(needs.matrices.outputs.checks) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
