@@ -88,7 +88,7 @@ jobs:
         id: cache-store-restore
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-packages-${{ runner.os }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'Cargo.lock', 'Cargo.toml', 'crates/**') }}
+          primary-key: nix-packages-${{ runner.os }}-${{ github.sha }}
           restore-prefixes-first-match: nix-packages-${{ runner.os }}-
           gc-max-store-size-linux: 8G
           purge: true
@@ -121,7 +121,7 @@ jobs:
         id: cache-store-restore
         uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-packages-${{ runner.os }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'Cargo.lock', 'Cargo.toml', 'crates/**') }}
+          primary-key: nix-packages-${{ runner.os }}-${{ github.sha }}
           restore-prefixes-first-match: nix-packages-${{ runner.os }}-
 
       - name: Build ${{ matrix.package }}
@@ -153,7 +153,7 @@ jobs:
         id: cache-store-restore
         uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-packages-${{ runner.os }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'Cargo.lock', 'Cargo.toml', 'crates/**') }}
+          primary-key: nix-packages-${{ runner.os }}-${{ github.sha }}
           restore-prefixes-first-match: nix-packages-${{ runner.os }}-
 
       - name: Build ${{ matrix.check }} for x86_64-linux
