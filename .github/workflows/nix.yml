@@ -49,6 +49,28 @@ jobs:
               - 'flake.nix'
               - 'flake.lock'
 
+  matrices:
+    name: Generate Matrices
+    needs: changes
+    if: ${{ needs.changes.outputs.files_changed == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.gen.outputs.packages }}
+      checks: ${{ steps.gen.outputs.checks }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b97f05dcb019ddea06450a50ef6203d2fdc19fee # v31
+      - id: gen
+        run: |
+          echo "packages=$(nix eval .#packages.x86_64-linux --json \
+            --apply 'ps: builtins.filter (n: !builtins.elem n ["demo-vm" "ci-cargo-artifacts"]) (builtins.attrNames ps)')" >> "$GITHUB_OUTPUT"
+          # caches is excluded because its seeded narinfo sigs cannot pass the
+          # provenance gate, it has never run in CI and needs its own fix.
+          echo "checks=$(nix eval .#checks.x86_64-linux --json \
+            --apply 'cs: builtins.filter (n: !builtins.elem n ["full" "cargo-deny" "formatting" "codegen-up-to-date" "caches"]) (builtins.attrNames cs)')" >> "$GITHUB_OUTPUT"
+
   build-packages:
     name: Build Packages
     needs: changes
@@ -66,9 +88,9 @@ jobs:
         id: cache-store-restore
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-packages-${{ runner.os }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'Cargo.lock', 'Cargo.toml', 'crates/**') }}
+          primary-key: nix-packages-${{ runner.os }}-${{ github.sha }}
           restore-prefixes-first-match: nix-packages-${{ runner.os }}-
-          gc-max-store-size-linux: 5G
+          gc-max-store-size-linux: 8G
           purge: true
           purge-prefixes: nix-packages-${{ runner.os }}-
           purge-created: 0
@@ -77,25 +99,19 @@ jobs:
 
       - name: Build all circus packages
         run: |
-          nix build .#circus-cli .#circus-agent .#circus-agent-static \
-                    .#circus-evaluator \
-                    .#circus-queue-runner .#circus-server -L --no-link
+          nix build .#circus-agent-static .#circus-server    .#circus-cli   \
+                    .#circus-queue-runner .#circus-evaluator .#circus-agent \
+                    .#ci-cargo-artifacts -L --out-link result-circus
 
   build:
     name: Build ${{ matrix.package }}
-    needs: [changes, build-packages]
+    needs: [changes, matrices, build-packages]
     if: ${{ needs.changes.outputs.files_changed == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        package:
-          - circus-cli
-          - circus-agent
-          - circus-agent-static
-          - circus-evaluator
-          - circus-queue-runner
-          - circus-server
+        package: ${{ fromJSON(needs.matrices.outputs.packages) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -105,34 +121,40 @@ jobs:
         id: cache-store-restore
         uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-packages-${{ runner.os }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'Cargo.lock', 'Cargo.toml', 'crates/**') }}
+          primary-key: nix-packages-${{ runner.os }}-${{ github.sha }}
           restore-prefixes-first-match: nix-packages-${{ runner.os }}-
 
       - name: Build ${{ matrix.package }}
         run: nix build .#${{ matrix.package }} -L --no-link
 
-  nixos-module-agent:
-    name: Build NixOS module agent package
-    needs: changes
+  vm-test:
+    name: ${{ matrix.check }}
+    needs: [changes, matrices, build-packages]
     if: ${{ needs.changes.outputs.files_changed == 'true' }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(needs.matrices.outputs.checks) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@b97f05dcb019ddea06450a50ef6203d2fdc19fee # v31
+        with:
+          enable_kvm: true
+          extra_nix_config: |
+            system-features = kvm benchmark big-parallel nixos-test uid-range
+            extra-experimental-features = nix-command flakes auto-allocate-uids cgroups
+            auto-allocate-uids = true
+            use-cgroups = true
+
       - name: Restore cached paths
         id: cache-store-restore
-        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', '**/flake.lock', 'Cargo.lock', 'Cargo.toml', 'crates/**') }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-
-          gc-max-store-size-linux: 5G
-          purge: true
-          purge-prefixes: nix-${{ runner.os }}-
-          purge-created: 0
-          purge-last-accessed: 0
-          purge-primary-key: never
+          primary-key: nix-packages-${{ runner.os }}-${{ github.sha }}
+          restore-prefixes-first-match: nix-packages-${{ runner.os }}-
 
-      - name: Build NixOS module agent package
-        run: nix build .#checks.x86_64-linux.nixos-module-agent-package -L --no-link
+      - name: Build ${{ matrix.check }} for x86_64-linux
+        run: nix build .#checks.x86_64-linux.${{ matrix.check }} -L --no-link

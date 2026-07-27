@@ -16,8 +16,34 @@
   in {
     # NixOS modules for Circus and components
     nixosModules = {
-      circus = ./nix/modules/circus.nix;
-      circus-agent = ./nix/modules/circus-agent.nix;
+      circus = {
+        _file = ./flake.nix;
+        key = "circus/nixosModules/circus";
+        imports = [
+          ./nix/modules/circus.nix
+          ({pkgs, ...}: let
+            packages = self.packages.${pkgs.stdenv.hostPlatform.system};
+          in {
+            services.circus = {
+              package = lib.mkDefault packages.circus-server;
+              evaluatorPackage = lib.mkDefault packages.circus-evaluator;
+              queueRunnerPackage = lib.mkDefault packages.circus-queue-runner;
+              migratePackage = lib.mkDefault packages.circus-cli;
+            };
+          })
+        ];
+      };
+      circus-agent = {
+        _file = ./flake.nix;
+        key = "circus/nixosModules/circus-agent";
+        imports = [
+          ./nix/modules/circus-agent.nix
+          ({pkgs, ...}: {
+            services.circus-agent.package =
+              lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.circus-agent;
+          })
+        ];
+      };
       default = self.nixosModules.circus; # agent is optional
     };
 
@@ -69,23 +95,17 @@
       };
 
       depsCommonArgs = commonArgs // {src = cargoDepsSrc;};
-      cargoArtifactsFor = name: cargoExtraArgs:
-        craneLib.buildDepsOnly (depsCommonArgs
-          // {
-            pname = name;
-            inherit cargoExtraArgs;
-          });
+      cargoArtifacts = craneLib.buildDepsOnly depsCommonArgs;
 
       # Kept out of commonArgs so the shared dependency artifacts stay cached across commits
       buildShaArgs = {
         env = commonArgs.env // {CIRCUS_BUILD_SHA = self.rev or self.dirtyRev or "";};
       };
 
-      callCratePackage = path: name: cargoExtraArgs:
+      callCratePackage = path:
         pkgs.callPackage path {
-          inherit craneLib;
+          inherit craneLib cargoArtifacts;
           commonArgs = commonArgs // buildShaArgs;
-          cargoArtifacts = cargoArtifactsFor name cargoExtraArgs;
         };
 
       muslCrossAttr = {
@@ -111,22 +131,40 @@
         hardeningDisable = ["fortify" "fortify3"];
         env.CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
       };
+      staticCargoArtifacts = staticCraneLib.buildDepsOnly staticAgentArgs;
     in
       {
         demo-vm = pkgs.callPackage ./nix/demo-vm.nix {inherit self;};
 
         # circus Packages
-        circus-cli = callCratePackage ./nix/packages/circus-cli.nix "circus-cli" "--package circus-cli --bin circusctl";
-        circus-agent = callCratePackage ./nix/packages/circus-agent.nix "circus-agent" "--package circus-agent";
-        circus-evaluator = callCratePackage ./nix/packages/circus-evaluator.nix "circus-evaluator" "--package circus-evaluator";
-        circus-queue-runner = callCratePackage ./nix/packages/circus-queue-runner.nix "circus-queue-runner" "--package circus-queue-runner";
-        circus-server = callCratePackage ./nix/packages/circus-server.nix "circus-server" "--package circus-server";
+        circus-cli = callCratePackage ./nix/packages/circus-cli.nix;
+        circus-agent = callCratePackage ./nix/packages/circus-agent.nix;
+        circus-evaluator = callCratePackage ./nix/packages/circus-evaluator.nix;
+        circus-queue-runner = callCratePackage ./nix/packages/circus-queue-runner.nix;
+        circus-server = callCratePackage ./nix/packages/circus-server.nix;
+
+        ci-cargo-artifacts = pkgs.linkFarm "ci-cargo-artifacts" ([
+            {
+              name = "deps";
+              path = cargoArtifacts;
+            }
+            {
+              name = "vendor";
+              path = craneLib.vendorCargoDeps depsCommonArgs;
+            }
+          ]
+          ++ lib.optionals (muslCrossAttr ? ${system}) [
+            {
+              name = "deps-static";
+              path = staticCargoArtifacts;
+            }
+          ]);
       }
       // lib.optionalAttrs (muslCrossAttr ? ${system}) {
         circus-agent-static = staticCraneLib.buildPackage (
           staticAgentArgs
           // {
-            cargoArtifacts = staticCraneLib.buildDepsOnly staticAgentArgs;
+            cargoArtifacts = staticCargoArtifacts;
             env = staticAgentArgs.env // {CIRCUS_BUILD_SHA = self.rev or self.dirtyRev or "";};
           }
         );
@@ -137,7 +175,6 @@
       craneLib = crane.mkLib pkgs;
 
       callTest = path: pkgs.callPackage path {inherit self;};
-      nixosModuleAgentPackage = pkgs.callPackage ./nix/package.nix {crate = "circus-agent";};
       vmTests = {
         # Split VM integration tests
         service-startup = callTest ./nix/tests/startup.nix;
@@ -160,7 +197,6 @@
     in
       vmTests
       // {
-        nixos-module-agent-package = nixosModuleAgentPackage;
         full = pkgs.symlinkJoin {
           name = "vm-tests-full";
           paths = builtins.attrValues vmTests;
